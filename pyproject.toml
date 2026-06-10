@@ -1,0 +1,29 @@
+[project]
+name = "badass-runner"
+version = "0.2.0"
+description = "BADASS Local Runner — connects local AI endpoints to BADASS Cloud"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+badass-runner = "badass_runner.cli:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["badass_runner*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
