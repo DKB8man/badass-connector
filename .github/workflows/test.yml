@@ -1,0 +1,52 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[test]"
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --tb=short
+
+      - name: Verify test suite does not import monorepo packages
+        run: |
+          if grep -rn --include="*.py" \
+            -E "^(from|import) (backend|frontend|scanners|app)\." \
+            tests/; then
+            echo "Forbidden monorepo imports found in tests."
+            exit 1
+          fi
+
+          echo "OK — no forbidden imports found."
