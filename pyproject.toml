@@ -1,6 +1,6 @@
 [project]
 name = "badass-runner"
-version = "0.2.0"
+version = "0.3.0"
 description = "BADASS Local Runner — connects local AI endpoints to BADASS Cloud"
 requires-python = ">=3.11"
 dependencies = [
