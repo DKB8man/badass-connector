@@ -7,6 +7,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.2] — 2026-06-12
+
+### Fixed
+
+- `__version__` in `badass_runner/__init__.py` now matches `pyproject.toml`. Previously the package reported `0.2.0` to BADASS Cloud even after upgrading, because the version string was hardcoded in the module and not updated alongside `pyproject.toml`.
+
+---
+
 ## [0.3.1] — 2026-06-12
 
 ### Fixed
