@@ -53,7 +53,7 @@ pip install -e ".[dev]"
 
 ```bash
 badass-runner --version
-# badass-runner, version 0.2.0
+# badass-runner, version 0.3.2
 ```
 
 ```bash
@@ -62,10 +62,45 @@ badass-runner --help
 
 ---
 
+## Starting a new terminal session
+
+If you installed inside a virtual environment, you must activate it each time you open a new terminal before using `badass-runner`:
+
+```bash
+# macOS / Linux
+source .venv/bin/activate   # or: source ~/.badass-runner-env/bin/activate
+
+# Windows
+.venv\Scripts\activate
+```
+
+Once activated, the prompt changes to show the venv name and `badass-runner` is available:
+
+```bash
+badass-runner start
+```
+
+---
+
 ## Upgrading
+
+### Installed from PyPI
 
 ```bash
 pip install --upgrade badass-runner
+badass-runner stop
+badass-runner start
+```
+
+### Installed from source
+
+```bash
+cd /path/to/badass-connector
+git pull origin main
+source .venv/bin/activate   # activate venv if using one
+pip install .
+badass-runner stop
+badass-runner start
 ```
 
 The connector checks its own version against the cloud's declared minimum on every `login` and `start`. If your installed version is below the minimum, startup will refuse with a clear upgrade message.
