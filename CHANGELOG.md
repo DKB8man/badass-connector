@@ -13,6 +13,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 - `__version__` in `badass_runner/__init__.py` now matches `pyproject.toml`. Previously the package reported `0.2.0` to BADASS Cloud even after upgrading, because the version string was hardcoded in the module and not updated alongside `pyproject.toml`.
 
+### Documentation
+
+- `docs/install.md`: added **"Starting a new terminal session"** section explaining that virtual environment users must run `source .venv/bin/activate` each time they open a new terminal before using `badass-runner`.
+- `docs/install.md`: split **Upgrading** into two separate paths — PyPI (`pip install --upgrade`) and from source (`git pull` + `pip install .`), both including the required `stop` + `start` restart steps.
+- `docs/install.md`: corrected version number in the verify example from `0.2.0` to `0.3.2`.
+
 ---
 
 ## [0.3.1] — 2026-06-12
