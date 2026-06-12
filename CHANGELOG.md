@@ -7,6 +7,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.1] — 2026-06-12
+
+### Fixed
+
+- Added `readme = "README.md"` and `license` to `pyproject.toml` so PyPI displays the full project description and license on the package page.
+- Removed `pytest` from main runtime dependencies (test-only; remains under `[project.optional-dependencies]`).
+
+---
+
 ## [0.3.0] — 2026-06-11
 
 ### Changed
