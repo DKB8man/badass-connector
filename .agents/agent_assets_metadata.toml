@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "qJJC7WOaC5bklTKnMTlGd"
+uri = "file://docs/pypi-release-process.md"
+type = "text"
+title = "PyPI Release Process"
