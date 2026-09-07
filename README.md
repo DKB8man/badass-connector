@@ -61,23 +61,28 @@ See [docs/install.md](docs/install.md) for detailed install options, virtual env
 
 ## Quick start
 
-### 1. Pair this machine with BADASS Cloud
+### 1. Create a registration token
+
+Open **Connect Runner** in BADASS Cloud, name the connector, and create its
+one-time account-owned registration token.
+
+### 2. Register and start the connector
 
 ```bash
-badass-runner login --server-url https://badass-sec.com
+badass-runner start \
+  --server-url https://badass-sec.com \
+  --token badass_reg_YOURTOKEN \
+  --name my-private-ai-server
 ```
 
-This opens a browser window showing a short pairing code. Approve it in the BADASS Cloud dashboard. No token or password is required on the command line — the credential is negotiated during the pairing handshake and saved locally.
-
-You only need to run `login` once per machine.
-
-### 2. Start the connector
+The one-time token is exchanged for a permanent local runner credential. The
+connector runs in the foreground, sends a heartbeat to the cloud every 30
+seconds, and polls for harness jobs assigned to it. Later starts use the saved
+credential:
 
 ```bash
 badass-runner start
 ```
-
-The connector runs in the foreground, sends a heartbeat to the cloud every 30 seconds, and polls for harness jobs assigned to it. When a job arrives it executes the test sequence locally against your endpoint, strips credentials from the results, and uploads the sanitized transcript.
 
 Press **Ctrl-C** or run `badass-runner stop` (from another terminal) to shut it down.
 
@@ -108,9 +113,10 @@ Credentials (API keys, Bearer tokens) are stored in the connector's **local auth
 
 ---
 
-## Alternative: token-based registration
+## Token-based registration for headless systems
 
-If your workflow does not support a browser (CI pipelines, headless servers), you can generate a one-time registration token in the BADASS Cloud dashboard and pass it directly:
+CI pipelines and headless systems use the same account-owned one-time
+registration-token flow:
 
 ```bash
 badass-runner start \
@@ -178,8 +184,8 @@ See [docs/security-model.md](docs/security-model.md) for the full technical desc
 
 | Command | Description |
 |---|---|
-| `badass-runner login` | Pair this machine with BADASS Cloud via browser |
-| `badass-runner start` | Start the connector (foreground) |
+| `badass-runner start --token …` | Register a new connector with a dashboard-issued one-time token |
+| `badass-runner start` | Start a previously registered connector (foreground) |
 | `badass-runner status` | Show whether a connector process is running locally |
 | `badass-runner stop` | Send SIGTERM to the running connector |
 | `badass-runner recorder` | HTTP traffic recorder for endpoint discovery |

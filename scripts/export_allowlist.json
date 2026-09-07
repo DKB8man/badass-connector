@@ -1,0 +1,31 @@
+{
+  "package": [
+    "badass_runner/__init__.py",
+    "badass_runner/cli.py",
+    "badass_runner/client.py",
+    "badass_runner/config.py",
+    "badass_runner/heartbeat.py",
+    "badass_runner/logs.py",
+    "badass_runner/recorder_cli.py",
+    "badass_runner/status_server.py",
+    "badass_runner/classifier/__init__.py",
+    "badass_runner/classifier/classifier.py",
+    "badass_runner/harness/__init__.py",
+    "badass_runner/harness/enforcement.py",
+    "badass_runner/harness/executor.py",
+    "badass_runner/harness/job_poller.py",
+    "badass_runner/harness/sanitize.py",
+    "badass_runner/recorder/__init__.py",
+    "badass_runner/recorder/proxy.py",
+    "badass_runner/recorder/redact.py",
+    "badass_runner/recorder/session.py",
+    "badass_runner/recorder/storage.py",
+    "badass_runner/target/__init__.py",
+    "badass_runner/target/builder.py",
+    "badass_runner/target/validator.py"
+  ],
+  "root_files": ["pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md"],
+  "docs": ["docs/**/*.md"],
+  "guard_scripts": ["scripts/export_guard.py", "scripts/export_allowlist.json", "scripts/release_gate.py"],
+  "ci": [".github/workflows/test.yml"]
+}

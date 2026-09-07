@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..logs import get_logger, log
-from .redact import redact_body, redact_cookies, redact_headers
+from .redact import redact_body, redact_cookies, redact_headers, redact_text
 from .session import Capture, store
 
 logger = get_logger()
@@ -88,7 +88,7 @@ def _make_handler(session_id: str) -> type:
                 "content_type": content_type,
                 "headers": redact_headers(raw_headers),
                 "cookies": redact_cookies(cookie_header),
-                "body_snippet": redact_body(body_str[:BODY_SNIPPET_MAX]),
+                "body_snippet": redact_body(body_str, BODY_SNIPPET_MAX),
                 "timestamp": _now_iso(),
             }
 
@@ -110,12 +110,13 @@ def _make_handler(session_id: str) -> type:
                     follow_redirects=True,
                 )
             except Exception as exc:
-                log(logger, "warning", "Recorder proxy upstream error", error=str(exc))
-                self._reject(502, f"Upstream error: {exc}")
+                safe_error = redact_text(str(exc))
+                log(logger, "warning", "Recorder proxy upstream error", error=safe_error)
+                self._reject(502, f"Upstream error: {safe_error}")
                 session.add_capture(
                     Capture(
                         request=req_meta,
-                        response={"error": str(exc), "timestamp": _now_iso()},
+                        response={"error": safe_error, "timestamp": _now_iso()},
                     )
                 )
                 return
@@ -125,7 +126,7 @@ def _make_handler(session_id: str) -> type:
             resp_meta = {
                 "status": upstream_resp.status_code,
                 "content_type": upstream_resp.headers.get("content-type", ""),
-                "body_snippet": redact_body(resp_text[:BODY_SNIPPET_MAX]),
+                "body_snippet": redact_body(resp_text, BODY_SNIPPET_MAX),
                 "timestamp": _now_iso(),
             }
 

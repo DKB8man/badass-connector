@@ -9,7 +9,9 @@ Rules
 """
 
 import re
-from typing import Dict
+from typing import Dict, Optional
+
+from badass_runner_protocol import redact_before_truncate
 
 REDACTED = "[REDACTED]"
 
@@ -32,10 +34,6 @@ _ALWAYS_REDACT_HEADERS: frozenset = frozenset(
 _SENSITIVE_HEADER_RE = re.compile(
     r"(token|secret|key|password|passwd|credential|auth)", re.IGNORECASE
 )
-
-# Body patterns
-_BEARER_RE = re.compile(r"(?i)Bearer\s+\S+")
-_BASIC_RE = re.compile(r"(?i)Basic\s+\S+")
 
 # CSRF / form-body patterns
 # Matches both URL-encoded (csrf_token=<val>) and JSON ("csrf_token": "<val>") forms.
@@ -111,7 +109,16 @@ def _redact_cookie_line(m: re.Match) -> str:
     return m.group(1) + redact_cookies(m.group(2))
 
 
-def redact_body(body: str) -> str:
+def _redact_recorder_fields(body: str) -> str:
+    """Apply recorder-specific CSRF and named-secret field rules."""
+    body = _CSRF_URLENC_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", body)
+    body = _CSRF_JSON_RE.sub(lambda m: m.group(0).split(":")[0] + f': "{REDACTED}"', body)
+    body = _API_KEY_URLENC_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", body)
+    body = _API_KEY_JSON_RE.sub(lambda m: m.group(0).split(":")[0] + f': "{REDACTED}"', body)
+    return body
+
+
+def redact_body(body: str, max_length: Optional[int] = None) -> str:
     """Redact auth tokens and CSRF secrets embedded in a body snippet.
 
     Handles:
@@ -122,13 +129,12 @@ def redact_body(body: str) -> str:
     * URL-encoded API-key fields: ``x-api-key=<val>``, ``api_key=<val>``, etc.
     * JSON API-key fields: ``"x-api-key": "<val>"``, ``"api_key": "<val>"``, etc.
     """
-    body = _BEARER_RE.sub(f"Bearer {REDACTED}", body)
-    body = _BASIC_RE.sub(f"Basic {REDACTED}", body)
-    body = _CSRF_URLENC_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", body)
-    body = _CSRF_JSON_RE.sub(lambda m: m.group(0).split(":")[0] + f': "{REDACTED}"', body)
-    body = _API_KEY_URLENC_RE.sub(lambda m: f"{m.group(1)}={REDACTED}", body)
-    body = _API_KEY_JSON_RE.sub(lambda m: m.group(0).split(":")[0] + f': "{REDACTED}"', body)
-    return body
+    limit = len(body) if max_length is None else max_length
+    return redact_before_truncate(
+        body,
+        limit,
+        additional_redactor=_redact_recorder_fields,
+    )
 
 
 def redact_text(text: str) -> str:

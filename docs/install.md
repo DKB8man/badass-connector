@@ -11,8 +11,10 @@
 The connector depends only on:
 - [`click`](https://click.palletsprojects.com/) ≥ 8.0 — CLI framework
 - [`httpx`](https://www.python-httpx.org/) ≥ 0.28.0 — HTTP client
+- [`pydantic`](https://docs.pydantic.dev/) = 2.12.5 — strict wire-contract validation
+- `badass-runner-protocol` = 0.1.0 — public runner/cloud protocol contracts
 
-Both are installed automatically.
+All dependencies are installed automatically.
 
 ---
 
@@ -53,7 +55,7 @@ pip install -e ".[dev]"
 
 ```bash
 badass-runner --version
-# badass-runner, version 0.3.2
+# badass-runner, version 0.4.0
 ```
 
 ```bash
@@ -62,48 +64,15 @@ badass-runner --help
 
 ---
 
-## Starting a new terminal session
-
-If you installed inside a virtual environment, you must activate it each time you open a new terminal before using `badass-runner`:
-
-```bash
-# macOS / Linux
-source .venv/bin/activate   # or: source ~/.badass-runner-env/bin/activate
-
-# Windows
-.venv\Scripts\activate
-```
-
-Once activated, the prompt changes to show the venv name and `badass-runner` is available:
-
-```bash
-badass-runner start
-```
-
----
-
 ## Upgrading
-
-### Installed from PyPI
 
 ```bash
 pip install --upgrade badass-runner
-badass-runner stop
-badass-runner start
 ```
 
-### Installed from source
-
-```bash
-cd /path/to/badass-connector
-git pull origin main
-source .venv/bin/activate   # activate venv if using one
-pip install .
-badass-runner stop
-badass-runner start
-```
-
-The connector checks its own version against the cloud's declared minimum on every `login` and `start`. If your installed version is below the minimum, startup will refuse with a clear upgrade message.
+The connector checks its version against the cloud's declared minimum before
+`start`. If the installed version is below the minimum, startup refuses to
+continue and prints the upgrade command.
 
 ---
 
@@ -137,7 +106,9 @@ Override the directory by setting `BADASS_RUNNER_HOME` before running any comman
 
 ```bash
 export BADASS_RUNNER_HOME=/opt/badass-runner
-badass-runner login --server-url https://badass-sec.com
+badass-runner start \
+  --token badass_reg_<one-time-token> \
+  --server-url https://badass-sec.com
 ```
 
 ---

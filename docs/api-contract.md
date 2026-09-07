@@ -1,11 +1,11 @@
 # BADASS Connector — Cloud API Contract
 
-This document describes the nine HTTP endpoints that the BADASS Connector
-(`badass-runner`) calls against a BADASS Cloud instance.  It is the authoritative
+This document describes the HTTP endpoints that the BADASS Connector
+(`badass-runner`) calls against a BADASS Cloud instance. It is the authoritative
 reference for anyone maintaining the connector, writing a compatible server, or
 reasoning about what data crosses the trust boundary.
 
-**Current connector version:** `0.2.0`  
+**Current connector version:** `0.4.0`
 **Base URL:** configured at runtime via `--server-url` / `BADASS_SERVER_URL`.
 No URL is hardcoded in the connector.
 
@@ -23,8 +23,6 @@ No URL is hardcoded in the connector.
    - [POST /api/runners/jobs/{run\_id}/complete](#35-post-apirunnersjobsrun_idcomplete)
    - [POST /api/runners/jobs/{run\_id}/fail](#36-post-apirunnersjobsrun_idfail)
    - [POST /api/runners/recorder/sessions](#37-post-apirunnersrecordersessions)
-   - [POST /api/runners/pair/start](#38-post-apirunnerspath-pairstart)
-   - [POST /api/runners/pair/poll](#39-post-apirunnerspairpoll)
 4. [Job lifecycle state machine](#4-job-lifecycle-state-machine)
 5. [Redaction and security guarantees](#5-redaction-and-security-guarantees)
 6. [Version compatibility](#6-version-compatibility)
@@ -34,18 +32,19 @@ No URL is hardcoded in the connector.
 
 ## 1. Auth overview
 
-The connector uses **two distinct bearer tokens**, each with a different lifetime
-and scope:
+The connector uses a permanent runner bearer token after its one-time
+registration token has been exchanged:
 
 | Token | Name | Lifetime | Used on |
 |---|---|---|---|
-| `runner_token` | Permanent runner credential | Until revoked | All authenticated endpoints |
-| `polling_token` | Ephemeral pairing credential | ≤ 600 s, single-use | `pair/poll` only |
+| `runner_token` | Permanent runner credential | Until revoked | Authenticated runner endpoints |
 
-Both tokens are sent as `Authorization: Bearer <token>`.
+The permanent token is sent as `Authorization: Bearer <token>`. The one-time
+registration token is sent in the body of `POST /api/runners/register`.
 
-`register` and `pair/start` are the only unauthenticated endpoints — they are
-the entry points that produce the tokens above.
+`register` and the version compatibility check require no runner credential.
+The dashboard creates the one-time registration token for an authenticated
+account and project.
 
 The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 `0600`).  It is **never logged, printed, or included in any cloud-bound payload**.
@@ -85,7 +84,8 @@ The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 ```json
 {
   "registration_token": "badass_reg_<opaque>",
-  "runner_version": "0.2.0"
+  "runner_version": "0.4.0",
+  "capabilities": ["enforcement_execution_plan_v2", "surface_probe_v1"]
 }
 ```
 
@@ -93,6 +93,7 @@ The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 |---|---|---|
 | `registration_token` | string | One-time token issued by BADASS Cloud (prefix `badass_reg_`). Consumed on first successful use. |
 | `runner_version` | string | Semver string from `badass_runner.__version__`. |
+| `capabilities` | string[] | Explicit feature protocols implemented by this runner. |
 
 #### Response — 200 OK
 
@@ -146,7 +147,8 @@ thread at a configurable interval (default: every 30 s).
 
 ```json
 {
-  "runner_version": "0.2.0"
+  "runner_version": "0.4.0",
+  "capabilities": ["enforcement_execution_plan_v2", "surface_probe_v1"]
 }
 ```
 
@@ -169,7 +171,7 @@ The connector ignores all fields in a successful heartbeat response.
 
 #### Security notes
 
-- No user data is sent; only the version string.
+- No user data is sent; only the version string and capability identifiers.
 - A 401 or 403 response causes the connector to stop immediately and exit with
   status 1, preventing a zombie runner from consuming cloud resources.
 
@@ -399,6 +401,17 @@ All turns are passed through `sanitize_turns()` before this call.
 `sanitize_turns()` is runner-local (in `badass_runner/harness/sanitize.py`)
 and does **not** import from the BADASS backend.
 
+For a test with `execution_type: "enforcement_probe"`, the runner does not
+execute prompt turns. It executes the versioned `enforcement_probe` plan and
+uploads `enforcement_observations` on that test result. Each variant contains
+exactly one authorized and one unauthorized leg. The upload contains only the
+variant name, leg identity, status, denial code, bounded sanitized response
+excerpt, sanitized error, and allowlisted response headers (`content-type`,
+`www-authenticate`, `allow`, `x-request-id`, `x-correlation-id`, `traceparent`).
+Request headers, cookies, `set-cookie`, authorization values, local credentials,
+and unbounded response bodies are never uploaded. The runner makes no verdict;
+the cloud evaluates these observations.
+
 ---
 
 ### 3.6 POST /api/runners/jobs/{run_id}/fail
@@ -521,133 +534,6 @@ endpoint before the user creates a target.
 
 ---
 
-### 3.8 POST /api/runners/pair/start
-
-**Purpose:** Begin a zero-config browser pairing session.  Returns a short-code
-and a browser URL the user approves to link this machine to their BADASS
-account.  Called by `badass-runner login`.
-
-**Auth:** None (anonymous).
-
-#### Request
-
-```json
-{
-  "device_id": "550e8400-e29b-41d4-a716-446655440000",
-  "runner_version": "0.2.0",
-  "runner_name": "my-laptop"
-}
-```
-
-| Field | Type | Notes |
-|---|---|---|
-| `device_id` | string (UUID) | Stable local identifier for this machine.  Generated once with `uuid.uuid4()` and persisted in `config.json`.  Re-used across re-pairings so the cloud can recognise the same device. |
-| `runner_version` | string | Semver string from `badass_runner.__version__`. |
-| `runner_name` | string \| null | Human-readable label (hostname or `--name` flag value).  May be null. |
-
-**Extra header:**
-
-```
-X-Badass-Server-Url: https://your-cloud-instance.example.com
-```
-
-This header carries the connector's configured server URL back to the cloud.
-The cloud may use it to construct the `browser_pair_url` correctly when
-operating behind a reverse proxy or with a custom domain.
-
-#### Response — 200 OK
-
-```json
-{
-  "pairing_code": "WXYZ-1234",
-  "browser_pair_url": "https://your-cloud.example.com/runners/pair?code=WXYZ-1234",
-  "polling_token": "<short-lived opaque token>",
-  "expires_in_seconds": 600
-}
-```
-
-| Field | Type | Notes |
-|---|---|---|
-| `pairing_code` | string | Short human-readable code displayed in the terminal for the user to verify. |
-| `browser_pair_url` | string | URL the connector opens in the user's browser for approval. |
-| `polling_token` | string | Short-lived bearer token used **only** for `pair/poll`.  Not stored in `config.json`. |
-| `expires_in_seconds` | int | Time until the pairing session expires.  The connector polls for at most `min(expires_in_seconds, 600)` seconds. |
-
-#### Status codes
-
-| Code | Meaning |
-|---|---|
-| 200 | Pairing session created. |
-| 4xx | Request rejected. |
-
-#### Security notes
-
-- `polling_token` is distinct from `runner_token` and is ephemeral: it exists
-  only during the login flow and is never written to disk.
-- The `X-Badass-Server-Url` header is informational; the cloud must not trust
-  it for authentication decisions.
-
----
-
-### 3.9 POST /api/runners/pair/poll
-
-**Purpose:** Check whether the user has approved the pairing session in their
-browser.  Polled every 3 seconds by `badass-runner login` until approved,
-expired, or timed out (10 minutes).
-
-**Auth:** `Authorization: Bearer <polling_token>`
-
-The `polling_token` here is the **ephemeral pairing token** from `pair/start`,
-**not** the permanent `runner_token`.
-
-#### Request
-
-No body.
-
-#### Response — 200 OK (pending)
-
-```json
-{
-  "status": "pending"
-}
-```
-
-#### Response — 200 OK (approved)
-
-```json
-{
-  "status": "approved",
-  "runner_token": "<permanent bearer token>",
-  "runner_id": "<opaque string>",
-  "runner_name": "my-laptop"
-}
-```
-
-| Field | Type | Notes |
-|---|---|---|
-| `status` | string | `"pending"` or `"approved"`. |
-| `runner_token` | string | Permanent bearer token for all subsequent authenticated calls.  Written to `config.json` (mode `0600`). |
-| `runner_id` | string | Stable runner identifier persisted in `config.json`. |
-| `runner_name` | string | Name confirmed by the cloud (may differ from what was sent if the cloud normalises it). |
-
-#### Status codes
-
-| Code | Meaning | Connector action |
-|---|---|---|
-| 200 | Pending or approved. | Parse `status`. |
-| 410 | Pairing session expired or already consumed. | Exit with error. |
-| 429 | Rate limited. | Sleep `_POLL_INTERVAL_S` (3 s) and retry. |
-| 4xx | Other auth failure. | Exit with error. |
-
-#### Security notes
-
-- On `"approved"`, `runner_token` is written to disk and the `polling_token`
-  is discarded (never stored).
-- The connector never logs `runner_token`; `redact_text()` is applied to any
-  error strings that might contain it.
-
----
-
 ## 4. Job lifecycle state machine
 
 States managed by the cloud; the connector drives transitions via API calls:
@@ -699,29 +585,23 @@ within the `runner/` directory.
 Every API call that includes a body sends:
 
 ```json
-{ "runner_version": "0.2.0" }
+{ "runner_version": "0.4.0" }
 ```
 
-The cloud **may** reject requests from connectors below a minimum supported
-version by returning 4xx.  The connector currently has no mechanism to detect
-or handle this gracefully — it will see the response as a generic API error.
-
-### Known ambiguity
-
-There is no published compatibility table and no
-`GET /api/runners/min-version` endpoint.  If a cloud upgrade drops support for
-an older connector version, users will see authentication or registration errors
-with no actionable guidance.
-
-**Recommended future addition (not yet implemented):**
+Before `start`, the connector calls the unauthenticated compatibility endpoint:
 
 ```
-GET /api/runners/min-version
-→ { "min_runner_version": "0.2.0" }
+GET /api/runners/version
+→ {
+  "minimum_runner_version": "0.2.0",
+  "recommended_runner_version": "0.4.0",
+  "api_contract_version": 1
+}
 ```
 
-The connector could call this at startup and print a clear upgrade message if
-`__version__ < min_runner_version`.
+Versions below the minimum stop with an actionable upgrade message. Versions
+below the recommendation warn but continue. If the endpoint is unavailable,
+the connector warns and continues for compatibility with older cloud releases.
 
 ---
 
@@ -737,8 +617,6 @@ source) and should be confirmed with the cloud implementation:
 | A3 | `jobs` | The cloud may return more than one job in the `jobs` array.  The connector only processes `jobs[0]` per poll cycle.  If the cloud sends many jobs at once, processing will be serialised and slow. | Medium — throughput degradation on multi-job queues. |
 | A4 | `jobs/{id}/claim` | The status code for a job that is no longer available (deleted, already completed) is unspecified.  The connector treats non-409, non-200 as a log-and-skip error. | Low — job is skipped; no data loss. |
 | A5 | `jobs/{id}/complete` | The response body is ignored.  If the cloud returns a structured error (e.g. schema validation failure), the connector logs it as a generic upload failure and calls `fail`. | Low — user sees a failed run; no silent data loss. |
-| A6 | `jobs/{id}/fail` | The `error` field is a free-form string.  The cloud display behaviour (truncation, sanitization) is unspecified.  The connector does not pass this string through `redact_text()`. | Medium — a poorly-handled exception message could leak a credential fragment into the cloud UI. See [§3.6](#36-post-apirunnersjobsrun_idfail). |
+| A6 | `jobs/{id}/fail` | The `error` field is a free-form string and is redacted before upload; cloud display truncation remains unspecified. | Low — runner-side redaction prevents known credential forms from crossing the boundary. |
 | A7 | `recorder/sessions` | `request_snippet` and `response_snippet` are always null in the current implementation.  Their expected shape when non-null is unspecified. | Low — fields are reserved; no current impact. |
-| A8 | `pair/start` | The `X-Badass-Server-Url` header is sent but its effect on `browser_pair_url` construction is unspecified. | Low — worst case is a misconfigured URL in the displayed message; the pairing flow still works. |
-| A9 | `pair/poll` | The `runner_name` field in the approved response may differ from the name sent in `pair/start`.  The connector accepts whatever the cloud returns. | Low — cosmetic only. |
-| A10 | All | There is no documented minimum connector version or graceful version-mismatch handling.  See [§6](#6-version-compatibility). | Medium — silent breakage on incompatible upgrades. |
+| A8 | All | The cloud owns minimum/recommended-version policy; operators must keep that policy compatible with released connector versions. See [§6](#6-version-compatibility). | Low — the runner reports an actionable mismatch before startup. |

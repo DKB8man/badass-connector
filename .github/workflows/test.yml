@@ -2,51 +2,45 @@ name: Test
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: ["main", "master"]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: ["main", "master"]
+
+permissions: {}
 
 jobs:
   test:
+    name: "pytest / Python ${{ matrix.python-version }}"
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - "3.11"
-          - "3.12"
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Setup Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install package and test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install ".[test]"
+        run: pip install ".[test]"
+
+      - name: Set up uv for isolated local artifact build
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run export-guard negative proofs
+        run: pytest tests/test_export_guard.py -v --tb=short
+
+      - name: Build, reproduce, and clean-install public artifacts
+        run: python scripts/release_gate.py all --output "$RUNNER_TEMP/badass-runner-release"
 
       - name: Run tests
-        run: |
-          pytest tests/ -v --tb=short
-
-      - name: Verify test suite does not import monorepo packages
-        run: |
-          if grep -rn --include="*.py" \
-            -E "^(from|import) (backend|frontend|scanners|app)\." \
-            tests/; then
-            echo "Forbidden monorepo imports found in tests."
-            exit 1
-          fi
-
-          echo "OK — no forbidden imports found."
+        run: pytest tests/ -v --tb=short

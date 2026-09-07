@@ -7,34 +7,37 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [0.3.2] — 2026-06-12
-
-### Fixed
-
-- `__version__` in `badass_runner/__init__.py` now matches `pyproject.toml`. Previously the package reported `0.2.0` to BADASS Cloud even after upgrading, because the version string was hardcoded in the module and not updated alongside `pyproject.toml`.
-
-### Documentation
-
-- `docs/install.md`: added **"Starting a new terminal session"** section explaining that virtual environment users must run `source .venv/bin/activate` each time they open a new terminal before using `badass-runner`.
-- `docs/install.md`: split **Upgrading** into two separate paths — PyPI (`pip install --upgrade`) and from source (`git pull` + `pip install .`), both including the required `stop` + `start` restart steps.
-- `docs/install.md`: corrected version number in the verify example from `0.2.0` to `0.3.2`.
-
----
-
-## [0.3.1] — 2026-06-12
-
-### Fixed
-
-- Added `readme = "README.md"` and `license` to `pyproject.toml` so PyPI displays the full project description and license on the package page.
-- Removed `pytest` from main runtime dependencies (test-only; remains under `[project.optional-dependencies]`).
-
----
-
-## [0.3.0] — 2026-06-11
+## [0.4.0] — 2026-09-07
 
 ### Changed
 
-- Bumped version to 0.3.0.
+- The canonical runner exposes only account-owned one-time-token registration.
+- Installation and API documentation now match the runner's complete dependency,
+  capability, compatibility-check, and credential behavior.
+
+### Security
+
+- Runner-capability ownership must originate from the authenticated account-side
+  registration-token flow.
+
+---
+
+## [0.3.0] — 2026-09-03
+
+### Added
+
+- Independent gateway enforcement-probe execution for runner-backed targets.
+- Paired authorized and insufficient-authorization requests with per-leg headers.
+- Sanitized enforcement observations containing status, bounded body excerpts,
+  denial codes, and allowlisted response headers only.
+- Explicit `enforcement_probe_v1` capability reporting at registration and heartbeat.
+- Runner-side destructive-operation and isolated-fixture safety enforcement.
+
+### Security
+
+- Local target credentials are used only while issuing authorized requests and
+  are stripped from response bodies, errors, and allowlisted response-header
+  values before upload. Request headers and unbounded bodies are never uploaded.
 
 ---
 
@@ -42,14 +45,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Version compatibility check** — `badass-runner login` and `badass-runner start`
-  now call `GET /api/runners/version` before connecting. If the connector is below
+- **Version compatibility check** — `badass-runner start` calls
+  `GET /api/runners/version` before connecting. If the connector is below
   the cloud's declared `minimum_runner_version`, startup exits with a clear upgrade
   message. If below `recommended_runner_version`, a non-fatal warning is printed.
   If the endpoint is unreachable (old cloud or network issue), a warning is printed
   and startup continues.
 - **`RunnerClient.check_version()`** — new unauthenticated method; safe to call
-  before login or token exchange.
+  before registration-token exchange.
 - **`_parse_version()` helper** — semver string → comparable int tuple; strips `v`
   prefix; returns `(0, 0, 0)` on malformed input.
 
@@ -72,9 +75,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- `badass-runner login` — zero-config browser pairing with BADASS Cloud. Displays
-  a short pairing code and polls for dashboard approval. Saves credentials to
-  `~/.badass-runner/config.json` (mode 0600).
 - `badass-runner start` — foreground connector process. Registers the runner
   (if a `--token` is provided) or reconnects using saved credentials. Runs a
   heartbeat loop (30-second interval) and polls for harness jobs.

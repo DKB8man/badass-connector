@@ -2,8 +2,14 @@ from typing import List, Optional
 
 import httpx
 
+from badass_runner_protocol import (
+    ENFORCEMENT_EXECUTION_PLAN_CAPABILITY,
+    SURFACE_PROBE_CAPABILITY,
+)
 from . import __version__ as RUNNER_VERSION
 from .recorder.redact import redact_text
+
+RUNNER_CAPABILITIES = [ENFORCEMENT_EXECUTION_PLAN_CAPABILITY, SURFACE_PROBE_CAPABILITY]
 
 
 class CloudAPIError(Exception):
@@ -38,6 +44,7 @@ class RunnerClient:
                 json={
                     "registration_token": registration_token,
                     "runner_version": RUNNER_VERSION,
+                    "capabilities": RUNNER_CAPABILITIES,
                 },
                 timeout=self.timeout,
             )
@@ -54,7 +61,10 @@ class RunnerClient:
         try:
             resp = httpx.post(
                 f"{self.server_url}/api/runners/heartbeat",
-                json={"runner_version": RUNNER_VERSION},
+                json={
+                    "runner_version": RUNNER_VERSION,
+                    "capabilities": RUNNER_CAPABILITIES,
+                },
                 headers=self._auth_headers(),
                 timeout=self.timeout,
             )
@@ -103,12 +113,28 @@ class RunnerClient:
 
         return resp.json()
 
-    def complete_job(self, run_id: str, results: List[dict]) -> dict:
-        """Upload sanitized test results and trigger cloud-side evaluation."""
+    def complete_job(
+        self,
+        run_id: str,
+        results: List[dict],
+        auth_status: Optional[str] = None,
+        auth_status_detail: Optional[str] = None,
+    ) -> dict:
+        """Upload sanitized test results and trigger cloud-side evaluation.
+
+        The optional ``auth_status`` ("ok" or "failed") and
+        ``auth_status_detail`` allow the runner to report its dynamic-auth
+        outcome so the cloud can persist it to harness_runs.auth_status.
+        """
+        body: dict = {"results": results}
+        if auth_status:
+            body["auth_status"] = auth_status
+        if auth_status_detail:
+            body["auth_status_detail"] = auth_status_detail
         try:
             resp = httpx.post(
                 f"{self.server_url}/api/runners/jobs/{run_id}/complete",
-                json={"results": results},
+                json=body,
                 headers=self._auth_headers(),
                 timeout=max(self.timeout, 120),
             )
@@ -120,17 +146,32 @@ class RunnerClient:
 
         return resp.json()
 
-    def fail_job(self, run_id: str, error: str) -> dict:
+    def fail_job(
+        self,
+        run_id: str,
+        error: str,
+        auth_status: Optional[str] = None,
+        auth_status_detail: Optional[str] = None,
+    ) -> dict:
         """Mark a job as failed on the cloud side.
 
         The error string is passed through ``redact_text`` before upload so
         that secrets accidentally captured in exception messages (e.g. Bearer
         tokens from HTTP responses) are never sent to the cloud.
+
+        The optional ``auth_status`` and ``auth_status_detail`` let the runner
+        report whether its auth step succeeded or failed, mirroring the
+        cloud-run auth progress tracking.
         """
+        body: dict = {"error": redact_text(error)}
+        if auth_status:
+            body["auth_status"] = auth_status
+        if auth_status_detail:
+            body["auth_status_detail"] = auth_status_detail
         try:
             resp = httpx.post(
                 f"{self.server_url}/api/runners/jobs/{run_id}/fail",
-                json={"error": redact_text(error)},
+                json=body,
                 headers=self._auth_headers(),
                 timeout=self.timeout,
             )
@@ -145,7 +186,7 @@ class RunnerClient:
     def check_version(self) -> dict:
         """Fetch version compatibility information from the cloud.
 
-        Unauthenticated — safe to call before login.
+        Unauthenticated — safe to call before registration or token exchange.
 
         Returns a dict with keys:
             ``minimum_runner_version``     — connectors below this must upgrade.
@@ -185,56 +226,6 @@ class RunnerClient:
             raise CloudAPIError(resp.status_code, _extract_detail(resp))
 
         return resp.json()
-
-    # ------------------------------------------------------------------
-    # Phase 8 — Zero-config pairing (login flow)
-    # ------------------------------------------------------------------
-
-    def pair_start(self, device_id: str, runner_name: Optional[str] = None) -> dict:
-        """Start a pairing session (anonymous).
-
-        Returns pairing_code, browser_pair_url, polling_token, expires_in_seconds.
-        """
-        try:
-            resp = httpx.post(
-                f"{self.server_url}/api/runners/pair/start",
-                json={
-                    "device_id": device_id,
-                    "runner_version": RUNNER_VERSION,
-                    "runner_name": runner_name,
-                },
-                headers={"X-Badass-Server-Url": self.server_url},
-                timeout=self.timeout,
-            )
-        except httpx.RequestError as exc:
-            raise ConnectionError(f"Cannot reach cloud: {exc}") from exc
-
-        if not resp.is_success:
-            raise CloudAPIError(resp.status_code, _extract_detail(resp))
-
-        return resp.json()
-
-    def pair_poll(self, polling_token: str) -> dict:
-        """Poll for pairing approval.
-
-        Returns {status: 'pending'} or {status: 'approved', runner_token, runner_id}.
-        Raises CloudAPIError with status 410 when expired/consumed.
-        Raises CloudAPIError with status 429 when rate-limited.
-        """
-        try:
-            resp = httpx.post(
-                f"{self.server_url}/api/runners/pair/poll",
-                headers={"Authorization": f"Bearer {polling_token}"},
-                timeout=self.timeout,
-            )
-        except httpx.RequestError as exc:
-            raise ConnectionError(f"Poll request failed: {exc}") from exc
-
-        if not resp.is_success:
-            raise CloudAPIError(resp.status_code, _extract_detail(resp))
-
-        return resp.json()
-
 
 def _extract_detail(resp: httpx.Response) -> str:
     try:

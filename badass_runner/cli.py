@@ -2,8 +2,7 @@
 
 Commands
 --------
-badass-runner login   Pair this machine with BADASS Cloud (no token required).
-badass-runner start   Register (or reconnect) and run the heartbeat loop.
+badass-runner start   Register with a one-time token, or reconnect with saved credentials.
 badass-runner status  Show whether a runner process is active locally.
 badass-runner stop    Send SIGTERM to the running runner process.
 """
@@ -11,10 +10,7 @@ badass-runner stop    Send SIGTERM to the running runner process.
 import os
 import signal
 import sys
-import threading
-import time
-import uuid
-import webbrowser
+from threading import Event
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +30,7 @@ from .config import (
     write_pid,
 )
 from .heartbeat import HeartbeatLoop
+from .harness.job_poller import JobPoller
 from .logs import get_logger, log
 from .recorder_cli import recorder_group
 from .status_server import LocalStatusServer
@@ -134,143 +131,6 @@ main.add_command(recorder_group)
 
 
 # ---------------------------------------------------------------------------
-# login  (Phase 8 — zero-config browser pairing)
-# ---------------------------------------------------------------------------
-
-_POLL_INTERVAL_S = 3
-_LOGIN_TIMEOUT_S = 600  # 10 minutes (matches server-side session TTL)
-
-
-@main.command()
-@click.option(
-    "--server-url", envvar="BADASS_SERVER_URL", required=True,
-    help="BADASS Cloud base URL (e.g. https://badass-sec.com).",
-)
-@click.option(
-    "--name", "runner_name", envvar="BADASS_RUNNER_NAME", default=None,
-    help="Human-readable name for this runner (default: hostname).",
-)
-@click.option(
-    "--config", "config_path", default=None, type=click.Path(),
-    help="Path to runner config file.",
-)
-def login(
-    server_url: str,
-    runner_name: Optional[str],
-    config_path: Optional[str],
-) -> None:
-    """Pair this machine with BADASS Cloud by approving in your browser.
-
-    No token required.  Run once per machine.  After pairing, use
-    ``badass-runner start`` to connect.
-    """
-    cfg_file = Path(config_path) if config_path else CONFIG_FILE
-    existing = load_config(cfg_file)
-
-    # Derive or reuse a stable device identifier for this machine.
-    device_id = (existing and existing.device_id) or str(uuid.uuid4())
-
-    effective_name = (
-        runner_name
-        or (existing and existing.runner_name)
-        or os.uname().nodename if hasattr(os, "uname") else "my-runner"
-    )
-
-    client = RunnerClient(server_url.rstrip("/"))
-    _check_cloud_version(client)
-
-    # ---- Start pairing session -------------------------------------------
-    click.echo("Starting pairing session with BADASS Cloud…")
-    try:
-        result = client.pair_start(device_id=device_id, runner_name=effective_name)
-    except CloudAPIError as exc:
-        click.echo(f"Error: {exc.detail} (HTTP {exc.status_code})", err=True)
-        sys.exit(1)
-    except ConnectionError as exc:
-        click.echo(f"Cannot reach cloud: {exc}", err=True)
-        sys.exit(1)
-
-    code = result["pairing_code"]
-    browser_url = result["browser_pair_url"]
-    polling_token = result["polling_token"]
-    expires_in = result.get("expires_in_seconds", 600)
-
-    click.echo("")
-    click.echo("╔══════════════════════════════════════╗")
-    click.echo(f"║  Pairing code:  {code:<22}║")
-    click.echo("╚══════════════════════════════════════╝")
-    click.echo("")
-    click.echo("A browser window will open automatically.")
-    click.echo(f"If it doesn't open, visit:\n  {browser_url}")
-    click.echo("")
-
-    # ---- Open browser -------------------------------------------------------
-    try:
-        opened = webbrowser.open(browser_url, new=2, autoraise=True)
-        if not opened:
-            click.echo("(Could not open browser automatically — please visit the URL above.)")
-    except Exception:
-        click.echo("(Could not open browser automatically — please visit the URL above.)")
-
-    # ---- Poll for approval --------------------------------------------------
-    deadline = time.monotonic() + min(expires_in, _LOGIN_TIMEOUT_S)
-    dots = 0
-
-    click.echo("Waiting for approval", nl=False)
-
-    while time.monotonic() < deadline:
-        try:
-            poll = client.pair_poll(polling_token)
-        except CloudAPIError as exc:
-            if exc.status_code == 429:
-                # Rate limited — back off briefly
-                time.sleep(_POLL_INTERVAL_S)
-                continue
-            if exc.status_code == 410:
-                click.echo("")
-                click.echo("Error: Pairing session expired or already used.", err=True)
-                sys.exit(1)
-            click.echo(f"\nPolling error ({exc.status_code}): {exc.detail}", err=True)
-            sys.exit(1)
-        except ConnectionError:
-            time.sleep(_POLL_INTERVAL_S)
-            continue
-
-        if poll.get("status") == "approved":
-            runner_token = poll["runner_token"]
-            runner_id = poll["runner_id"]
-            paired_name = poll.get("runner_name", effective_name)
-
-            # Persist the paired config so ``badass-runner start`` works
-            cfg = RunnerConfig(
-                server_url=server_url.rstrip("/"),
-                runner_name=paired_name,
-                runner_id=runner_id,
-                runner_token=runner_token,
-                device_id=device_id,
-            )
-            save_config(cfg, cfg_file)
-
-            click.echo("")
-            click.echo("")
-            click.echo(f"✓ Runner '{paired_name}' paired successfully! (id: {runner_id})")
-            click.echo("")
-            click.echo("Run the following to start the runner:")
-            click.echo("  badass-runner start")
-            return
-
-        # Still pending — show progress dots
-        dots = (dots + 1) % 4
-        click.echo("." * (dots + 1) + " " * (3 - dots), nl=False)
-        click.echo("\r" + "Waiting for approval" + "." * (dots + 1), nl=False)
-        time.sleep(_POLL_INTERVAL_S)
-
-    click.echo("")
-    click.echo("Error: Timed out waiting for approval. Run `badass-runner login` again.", err=True)
-    sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
 # start
 # ---------------------------------------------------------------------------
 
@@ -281,7 +141,7 @@ def login(
 )
 @click.option(
     "--token", "reg_token", envvar="BADASS_REG_TOKEN",
-    help="One-time registration token (badass_reg_…). Required on first start without prior login.",
+    help="One-time registration token (badass_reg_…). Required on first start.",
 )
 @click.option(
     "--name", "runner_name", envvar="BADASS_RUNNER_NAME",
@@ -304,7 +164,7 @@ def start(
 ) -> None:
     """Start the BADASS Local Runner (foreground process).
 
-    If you have already run ``badass-runner login``, no --token is required.
+    Once registered, later starts use the saved permanent runner credentials.
     """
     cfg_file = Path(config_path) if config_path else CONFIG_FILE
     existing = load_config(cfg_file)
@@ -334,8 +194,7 @@ def start(
     else:
         click.echo(
             "Error: No runner credentials found.\n"
-            "Run 'badass-runner login' to pair this machine, or\n"
-            "use --token <badass_reg_...> to register with a one-time token.",
+            "Use --token <badass_reg_...> to register with a one-time token.",
             err=True,
         )
         sys.exit(1)
@@ -379,7 +238,7 @@ def start(
     log(logger, "info", "PID written", pid=os.getpid())
 
     # ---- Shutdown event --------------------------------------------------
-    shutdown_event = threading.Event()
+    shutdown_event = Event()
 
     def _shutdown(reason: str) -> None:
         log(logger, "info", "Shutdown requested", reason=reason)
@@ -411,6 +270,25 @@ def start(
     status_server = LocalStatusServer(port=cfg.status_port, get_state=_get_state)
     status_server.start()
 
+    # ---- Harness job poller ----------------------------------------------
+    def _on_job_start(run_id: str) -> None:
+        _state.update(status="running_job", active_run_id=run_id)
+
+    def _on_job_complete(run_id: str, success: bool) -> None:
+        _state.update(
+            status="connected",
+            active_run_id=None,
+            last_run_id=run_id,
+            last_run_succeeded=success,
+        )
+
+    poller = JobPoller(
+        client=client,
+        on_job_start=_on_job_start,
+        on_job_complete=_on_job_complete,
+    )
+    poller.start()
+
     log(logger, "info", "Runner ready",
         runner_id=cfg.runner_id, status_port=cfg.status_port)
     click.echo(
@@ -420,16 +298,21 @@ def start(
     )
 
     # ---- Block until shutdown -------------------------------------------
-    shutdown_event.wait()
+    while not shutdown_event.wait(timeout=1):
+        if not poller.is_running():
+            log(logger, "error", "Job poller stopped unexpectedly")
+            _shutdown("poller_stopped")
+            break
     reason = _state.get("status", "shutdown")
 
     log(logger, "info", "Shutting down", reason=reason)
+    poller.stop()
     heartbeat.stop()
     status_server.stop()
     clear_pid(PID_FILE)
     log(logger, "info", "Runner stopped")
 
-    if reason in ("revoked", "invalid_auth"):
+    if reason in ("revoked", "invalid_auth", "poller_stopped"):
         click.echo(f"Runner stopped: {reason}.", err=True)
         sys.exit(1)
 

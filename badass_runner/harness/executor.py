@@ -19,12 +19,17 @@ import httpx
 
 from ..target.builder import LocalAuthStore
 from ..logs import get_logger, log
+from badass_runner_protocol import (
+    _denial_code,
+    deserialize_enforcement_probe,
+)
 
 logger = get_logger()
 
 MAX_GET_MESSAGE_LEN = 500
 DEFAULT_REQUEST_TIMEOUT = 15.0
 DEFAULT_INTER_STEP_DELAY = 0.5
+MAX_ENFORCEMENT_RESPONSE_BYTES = 4096
 
 _HTML_MARKERS = ["@vite/client", "@react-refresh", "<head", "<body", "<!doctype html"]
 
@@ -210,6 +215,9 @@ class LocalTestExecutor:
         auth_store: Optional[LocalAuthStore] = None,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
         inter_step_delay: float = DEFAULT_INTER_STEP_DELAY,
+        extra_body_fields: Optional[Dict] = None,
+        body_format: str = "flat",
+        can_cause_side_effects: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.message_path = message_path
@@ -219,6 +227,9 @@ class LocalTestExecutor:
         self.auth_store = auth_store
         self.request_timeout = request_timeout
         self.inter_step_delay = inter_step_delay
+        self.extra_body_fields: Dict = extra_body_fields if isinstance(extra_body_fields, dict) else {}
+        self.body_format = body_format or "flat"
+        self.can_cause_side_effects = bool(can_cause_side_effects)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -232,6 +243,172 @@ class LocalTestExecutor:
     def _url(self, path_override: Optional[str] = None) -> str:
         path = (path_override or self.message_path).lstrip("/")
         return self.base_url + "/" + path
+
+    def execute_surface_probe(self, paths: List[str]) -> List[Dict[str, Any]]:
+        """GET passive routes without auth and return observations, never verdicts."""
+        observations: List[Dict[str, Any]] = []
+        with httpx.Client(timeout=self.request_timeout, follow_redirects=False) as client:
+            for path in paths:
+                started = time.monotonic()
+                try:
+                    response = client.get(self._url(path))
+                    observations.append({
+                        "path": path,
+                        "status_code": response.status_code,
+                        "response_excerpt": (response.text or "")[:1000],
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "error": None,
+                    })
+                except Exception as exc:
+                    observations.append({
+                        "path": path,
+                        "status_code": 0,
+                        "response_excerpt": "",
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "error": str(exc)[:300],
+                    })
+                if self.inter_step_delay:
+                    time.sleep(self.inter_step_delay)
+        return observations
+
+    def execute_enforcement_probe(self, payload: dict) -> List[Dict[str, Any]]:
+        """Execute probe legs and return raw observations, never a verdict."""
+        probe = deserialize_enforcement_probe(payload)
+        method = (probe["method"] or self.method or "POST").upper()
+        if method in {"PUT", "PATCH", "DELETE"} and (
+            probe["non_mutating"]
+            or not self.can_cause_side_effects
+            or not probe["requires_isolated_fixture"]
+            or not probe["isolated_fixture"]
+        ):
+            return [
+                {
+                    "variant": variant["name"],
+                    "authorized": authorized,
+                    "status_code": 0,
+                    "response_headers": {},
+                    "response_body": "",
+                    "error": (
+                        "destructive enforcement probe requires explicit side-effect "
+                        "opt-in and a verified isolated fixture"
+                    ),
+                }
+                for variant in probe["unauthorized_variants"]
+                for authorized in (True, False)
+            ]
+
+        observations = []
+        for variant in probe["unauthorized_variants"]:
+            variant_mutating = (
+                probe["non_mutating"]
+                if variant["non_mutating"] is None
+                else variant["non_mutating"]
+            )
+            variant_fixture = (
+                probe["requires_isolated_fixture"]
+                if variant["requires_isolated_fixture"] is None
+                else variant["requires_isolated_fixture"]
+            )
+            if not variant_mutating and (
+                not self.can_cause_side_effects
+                or not variant_fixture
+                or not probe["isolated_fixture"]
+            ):
+                error = (
+                    "mutating enforcement probe requires explicit side-effect "
+                    "opt-in and a verified isolated fixture"
+                )
+                for authorized in (True, False):
+                    observations.append(
+                        {
+                            "variant": variant["name"],
+                            "authorized": authorized,
+                            "status_code": 0,
+                            "response_headers": {},
+                            "response_body": "",
+                            "error": error,
+                        }
+                    )
+                continue
+
+            body = dict(variant["request_body"] or probe["request_body"])
+            if "message" in body:
+                message = body.pop("message")
+                if self.body_format == "openai_messages":
+                    body["messages"] = [{"role": "user", "content": message}]
+                else:
+                    body[self.request_message_field] = message
+            body = {**self.extra_body_fields, **body}
+            authorized_headers = dict(probe["authorized_headers"] or {})
+            authorized_headers = self.auth_store.apply_to_headers(
+                authorized_headers
+            ) if self.auth_store else authorized_headers
+            for authorized, headers in (
+                (True, authorized_headers),
+                (False, dict(variant["headers"])),
+            ):
+                try:
+                    request_kwargs = {
+                        "method": method,
+                        "url": self._url(probe["path"]),
+                        "headers": dict(headers),
+                    }
+                    if method in {"GET", "HEAD"}:
+                        request_kwargs["params"] = body
+                    else:
+                        request_kwargs["json"] = body
+                        request_kwargs["headers"]["Content-Type"] = "application/json"
+                    with httpx.Client(
+                        timeout=self.request_timeout, follow_redirects=False
+                    ) as client:
+                        with client.stream(**request_kwargs) as response:
+                            body_bytes = bytearray()
+                            for chunk in response.iter_bytes():
+                                remaining = (
+                                    MAX_ENFORCEMENT_RESPONSE_BYTES - len(body_bytes)
+                                )
+                                if remaining <= 0:
+                                    break
+                                body_bytes.extend(chunk[:remaining])
+                            response_body = bytes(body_bytes).decode(
+                                "utf-8", errors="replace"
+                            )
+                            response_status = response.status_code
+                            response_headers = dict(response.headers)
+                    observations.append(
+                        {
+                            "variant": variant["name"],
+                            "authorized": authorized,
+                            "status_code": response_status,
+                            "response_headers": response_headers,
+                            "response_body": response_body,
+                            "denial_code": _denial_code(response_body),
+                            "error": None,
+                        }
+                    )
+                except httpx.TimeoutException:
+                    observations.append(
+                        {
+                            "variant": variant["name"],
+                            "authorized": authorized,
+                            "status_code": 0,
+                            "response_headers": {},
+                            "response_body": "",
+                            "error": "Target unreachable or timed out",
+                        }
+                    )
+                except Exception as exc:
+                    observations.append(
+                        {
+                            "variant": variant["name"],
+                            "authorized": authorized,
+                            "status_code": 0,
+                            "response_headers": {},
+                            "response_body": "",
+                            "error": f"Connection error: {exc}",
+                        }
+                    )
+        return observations
 
     # ------------------------------------------------------------------
     # Single-step execution
@@ -262,7 +439,7 @@ class LocalTestExecutor:
                         headers=auth_hdrs,
                     )
             else:
-                body = {self.request_message_field: message}
+                body = {**self.extra_body_fields, self.request_message_field: message}
                 with httpx.Client(timeout=self.request_timeout, follow_redirects=False) as c:
                     resp = c.request(
                         method=self.method,
