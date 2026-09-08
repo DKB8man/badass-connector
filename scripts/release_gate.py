@@ -26,6 +26,7 @@ RUNNER = Path(__file__).resolve().parents[1]
 REPOSITORY = RUNNER.parent
 PROTOCOL = REPOSITORY / "badass-runner-protocol"
 GUARD = RUNNER / "scripts" / "export_guard.py"
+PROTOCOL_GUARD_MANIFEST = RUNNER / "scripts" / "protocol_export_allowlist.json"
 EPOCH = "1704067200"
 MAX_ARCHIVE_MEMBERS = 10_000
 MAX_EXPANDED_BYTES = 100 * 1024 * 1024
@@ -209,22 +210,33 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
     try:
         runner_stage = work / "runner"
         protocol_stage = copy_protocol(work / "protocol")
+        run([
+            sys.executable, str(GUARD), "source", str(protocol_stage),
+            "--manifest", str(PROTOCOL_GUARD_MANIFEST),
+        ], RUNNER)
         run([sys.executable, str(GUARD), "stage", str(runner_stage)], RUNNER)
         run([sys.executable, str(GUARD), "source", str(runner_stage)], RUNNER)
         runner_project = (runner_stage / "pyproject.toml").read_text(encoding="utf-8")
-        if "[tool.uv.sources]" in runner_project or 'badass-runner-protocol==0.1.0' not in runner_project:
+        if "[tool.uv.sources]" in runner_project or 'badass-runner-protocol==0.2.0' not in runner_project:
             raise GateError("runner stage retained workspace override or lost exact protocol pin")
         protocol_out, runner_out = work / "protocol-dist", work / "runner-dist"
         protocol_out.mkdir()
         runner_out.mkdir()
         run(["uv", "build", "--out-dir", str(protocol_out)], protocol_stage)
         run(["uv", "build", "--out-dir", str(runner_out)], runner_stage)
+        protocol_files = built_artifacts(protocol_out, "badass-runner-protocol")
+        run([
+            sys.executable, str(GUARD), "artifact",
+            "--source", str(protocol_stage),
+            "--manifest", str(PROTOCOL_GUARD_MANIFEST),
+            *(str(path) for path in protocol_files),
+        ], RUNNER)
         runner_files = built_artifacts(runner_out, "badass-runner")
         run([sys.executable, str(GUARD), "artifact", "--source", str(runner_stage),
              *(str(p) for p in runner_files)], RUNNER)
         records: dict[str, dict[str, Any]] = {}
-        for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.1.0"),
-                                               ("badass-runner", runner_out, "0.4.2")):
+        for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.2.0"),
+                                               ("badass-runner", runner_out, "0.5.0")):
             files = built_artifacts(folder, distribution)
             for source in files:
                 kind = "wheel" if source.suffix == ".whl" else "sdist"
@@ -312,7 +324,7 @@ for name in ("badass-runner", "badass-runner-protocol"):
     text = "\n".join((site / f).read_text(errors="ignore") for f in (dist.files or []) if (site / f).is_file())
     if str(repository) in text or "badass-release-" in text: raise AssertionError("forbidden build path in metadata")
 requirements = [x.replace(" ", "") for x in (distribution("badass-runner").metadata.get_all("Requires-Dist") or [])]
-assert "badass-runner-protocol==0.1.0" in requirements
+assert "badass-runner-protocol==0.2.0" in requirements
 assert all(importlib.util.find_spec(x) is None for x in ("back"+"end", "front"+"end", "scan"+"ners", "app"))
 payload={"schema_version":2,"path":"/","method":"GET","request_body":{},"authorized_headers":None,"non_mutating":True,"requires_isolated_fixture":False,"isolated_fixture":False,"unauthorized_variants":[{"name":"none","headers":{},"request_body":None,"non_mutating":None,"requires_isolated_fixture":None}]}
 from badass_runner.harness.enforcement import deserialize_enforcement_probe
@@ -322,7 +334,7 @@ except ValueError: pass
 else: raise AssertionError("protocol accepted unknown field")
 entrypoint = pathlib.Path(sys.executable).with_name("badass-runner")
 version = subprocess.run([str(entrypoint),"--version"], check=True, text=True, capture_output=True)
-assert version.stdout.strip() == "badass-runner, version 0.4.2"
+assert version.stdout.strip() == "badass-runner, version 0.5.0"
 help_result = subprocess.run([str(entrypoint),"--help"], check=True, text=True, capture_output=True)
 assert "Commands:" in help_result.stdout and "start" in help_result.stdout
 """

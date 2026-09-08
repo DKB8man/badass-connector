@@ -5,7 +5,7 @@ This document describes the HTTP endpoints that the BADASS Connector
 reference for anyone maintaining the connector, writing a compatible server, or
 reasoning about what data crosses the trust boundary.
 
-**Current connector version:** `0.4.2`
+**Current connector version:** `0.5.0`
 **Base URL:** configured at runtime via `--server-url` / `BADASS_SERVER_URL`.
 No URL is hardcoded in the connector.
 
@@ -84,8 +84,12 @@ The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 ```json
 {
   "registration_token": "badass_reg_<opaque>",
-  "runner_version": "0.4.2",
-  "capabilities": ["enforcement_execution_plan_v2", "surface_probe_v1"]
+  "runner_version": "0.5.0",
+  "capabilities": [
+    "enforcement_execution_plan_v2",
+    "enforcement_execution_plan_context_refs_v1",
+    "surface_probe_v1"
+  ]
 }
 ```
 
@@ -93,7 +97,7 @@ The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 |---|---|---|
 | `registration_token` | string | One-time token issued by BADASS Cloud (prefix `badass_reg_`). Consumed on first successful use. |
 | `runner_version` | string | Semver string from `badass_runner.__version__`. |
-| `capabilities` | string[] | Explicit feature protocols implemented by this runner. |
+| `capabilities` | string[] | Exact feature protocols implemented by this runner. `enforcement_execution_plan_context_refs_v1` advertises schema-3 runner-local credential references. |
 
 #### Response — 200 OK
 
@@ -147,8 +151,12 @@ thread at a configurable interval (default: every 30 s).
 
 ```json
 {
-  "runner_version": "0.4.2",
-  "capabilities": ["enforcement_execution_plan_v2", "surface_probe_v1"]
+  "runner_version": "0.5.0",
+  "capabilities": [
+    "enforcement_execution_plan_v2",
+    "enforcement_execution_plan_context_refs_v1",
+    "surface_probe_v1"
+  ]
 }
 ```
 
@@ -241,6 +249,24 @@ may contain more than one job, but the connector currently processes only
 | `steps` | string[] | Ordered prompt strings sent to the AI endpoint sequentially. |
 | `endpoint_path` | string \| null | Per-test path override; falls back to `target.message_path` when null. |
 | `new_session_before` | int[] | 1-indexed step indices at which the connector should reset session state (e.g. clear cookies) before sending the step. |
+
+**Mode-2 referenced enforcement plans (schema 3):**
+
+When a runner advertises
+`enforcement_execution_plan_context_refs_v1`, an
+`execution_type: "enforcement_probe"` test may carry a schema-3
+`enforcement_probe`. Its target envelope includes an opaque `target_ref`
+(`targetref_…`), and the plan uses `authorized_credential_ref` plus optional
+per-variant `credential_ref` values (`credref_…`). Credential-bearing headers
+and credential values are structurally absent. Header overrides are restricted
+to validated non-secret headers.
+
+The runner binds references to the job's opaque target scope, resolves them
+against its local OS-keyring-backed store, materializes one request leg at a
+time in memory, and sanitizes observations before upload. A missing,
+ambiguous, or target-mismatched reference fails before any target request.
+Schema 2 remains unchanged and uses the existing value-bearing
+`authorized_headers` / variant `headers` contract.
 
 **`limits` object:**
 
@@ -391,8 +417,10 @@ The connector ignores all fields in a successful claim response.
 All turns are passed through `sanitize_turns()` before this call.
 `sanitize_turns()` applies three independent passes:
 
-1. **Exact-match pass:** replaces each `LocalAuthStore.credential_value` with
-   `[REDACTED]`.  Targets auth material the runner knows precisely.
+1. **Exact-match pass:** replaces each resolved local credential, its injected
+   header representation, relevant decoded components, and percent/form-encoded
+   variants with `[REDACTED]`. This targets auth material the runner knows
+   precisely before any observation crosses the runner boundary.
 2. **Pattern pass:** removes JWTs (`eyJ…`), `sk-*` API keys, and
    `Bearer`/`Basic` authorization values from all string fields.
 3. **Header key pass:** replaces the value of any dict entry whose key is in
@@ -431,7 +459,7 @@ be completed due to an execution or upload error.
 
 | Field | Type | Notes |
 |---|---|---|
-| `error` | string | Description of what went wrong. Should not contain credential material; the connector does not explicitly sanitize this string — callers should avoid logging raw exceptions that may contain auth values. |
+| `error` | string | Description of what went wrong. The connector applies `redact_text()` before upload. |
 
 #### Response — 200 OK
 
@@ -448,9 +476,8 @@ be completed due to an execution or upload error.
 
 #### Ambiguity
 
-The `error` field is a free-form string.  The cloud may display it to the user.
-The connector does not currently pass this string through `redact_text()` before
-sending.  Future versions should apply `redact_text()` here as a safety net.
+The `error` field is a free-form string and the cloud may display it to the
+user. The connector applies `redact_text()` before sending it.
 
 ---
 
@@ -585,7 +612,7 @@ within the `runner/` directory.
 Every API call that includes a body sends:
 
 ```json
-{ "runner_version": "0.4.2" }
+{ "runner_version": "0.5.0" }
 ```
 
 Before `start`, the connector calls the unauthenticated compatibility endpoint:
@@ -594,7 +621,7 @@ Before `start`, the connector calls the unauthenticated compatibility endpoint:
 GET /api/runners/version
 → {
   "minimum_runner_version": "0.2.0",
-  "recommended_runner_version": "0.4.2",
+  "recommended_runner_version": "0.5.0",
   "api_contract_version": 1
 }
 ```

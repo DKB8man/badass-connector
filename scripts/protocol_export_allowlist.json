@@ -1,0 +1,4 @@
+{
+  "metadata": ["pyproject.toml", "README.md"],
+  "protocol": ["src/badass_runner_protocol/**/*.py"]
+}

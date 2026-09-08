@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..client import CloudAPIError, RunnerClient
 from ..logs import get_logger, log
 from ..target.builder import LocalAuthStore
+from ..target.credentials import MultiContextCredentialStore
 from .executor import LocalTestExecutor
 from .sanitize import sanitize_turns
 from badass_runner_protocol import sanitize_enforcement_observations
@@ -69,7 +70,7 @@ class JobPoller:
     def __init__(
         self,
         client: RunnerClient,
-        auth_store: Optional[LocalAuthStore] = None,
+        auth_store: Optional[LocalAuthStore | MultiContextCredentialStore] = None,
         poll_interval: int = _POLL_INTERVAL,
         on_job_start: Optional[Callable[[str], None]] = None,
         on_job_complete: Optional[Callable[[str, bool], None]] = None,
@@ -177,13 +178,16 @@ class JobPoller:
         _uses_dynamic_auth: bool = _auth_type in _dynamic_auth_types
 
         _extra_body = target_cfg.get("extra_body_fields") or {}
+        # R5-B only makes the multi-context store available to the poller.
+        # It must not resolve a cloud credential reference or inject it until R5-C.
+        executor_auth_store = self.auth_store if isinstance(self.auth_store, LocalAuthStore) else None
         executor = LocalTestExecutor(
             base_url=target_cfg.get("base_url", ""),
             message_path=target_cfg.get("message_path", "/"),
             method=target_cfg.get("method", "POST"),
             request_message_field=target_cfg.get("request_message_field", "message"),
             response_message_field=target_cfg.get("response_message_field", "reply"),
-            auth_store=self.auth_store,
+            auth_store=executor_auth_store,
             inter_step_delay=float(limits.get("inter_request_delay_s", 0.5)),
             extra_body_fields=_extra_body if isinstance(_extra_body, dict) else {},
             body_format=target_cfg.get("body_format", "flat"),
@@ -192,8 +196,8 @@ class JobPoller:
 
         # Collect credential values for sanitization — never uploaded
         auth_secrets: List[str] = []
-        if self.auth_store and self.auth_store.credential_value:
-            auth_secrets.append(self.auth_store.credential_value)
+        if executor_auth_store and executor_auth_store.credential_value:
+            auth_secrets.append(executor_auth_store.credential_value)
 
         max_turns = int(limits.get("max_turns_per_test", 5))
         run_timeout = float(limits.get("overall_run_timeout_s", 600))
@@ -220,12 +224,25 @@ class JobPoller:
 
             try:
                 if execution_type == "enforcement_probe":
-                    raw_observations = executor.execute_enforcement_probe(
-                        test.get("enforcement_probe")
-                    )
-                    safe_observations = sanitize_enforcement_observations(
-                        raw_observations, auth_secrets
-                    )
+                    enforcement_probe = test.get("enforcement_probe")
+                    if (
+                        isinstance(enforcement_probe, dict)
+                        and enforcement_probe.get("schema_version") == 3
+                    ):
+                        # Schema-3 execution owns credential lifetime and
+                        # returns observations already redacted.
+                        safe_observations = executor.execute_referenced_enforcement_probe(
+                            enforcement_probe,
+                            self.auth_store,
+                            target_cfg.get("target_ref"),
+                        )
+                    else:
+                        raw_observations = executor.execute_enforcement_probe(
+                            enforcement_probe
+                        )
+                        safe_observations = sanitize_enforcement_observations(
+                            raw_observations, auth_secrets
+                        )
                     results.append({
                         "test_id": test_id,
                         "turns": [],
@@ -303,7 +320,7 @@ class JobPoller:
                         "test_id": test_id,
                         "turns": [],
                         "enforcement_observations": [],
-                        "error": None,
+                        "error": err_msg,
                         "endpoint_path": endpoint_path,
                     })
                 elif execution_type == "surface_probe":

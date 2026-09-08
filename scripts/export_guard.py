@@ -50,9 +50,9 @@ class GuardError(Exception):
     pass
 
 
-def load_manifest() -> set[str]:
+def load_manifest(path: Path = MANIFEST) -> set[str]:
     try:
-        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise GuardError(f"cannot read deterministic manifest: {exc}") from exc
     return set(item for group in data.values() for item in group)
@@ -239,9 +239,29 @@ def stage(destination: Path) -> None:
             shutil.copyfile(SOURCE_ROOT / rel, target)
 
 
-def guard_source(root: Path) -> None:
+def guard_source(root: Path, manifest: Path = MANIFEST) -> None:
     # Only the fixed development root may omit known generated/test directories.
-    source_files(root, load_manifest(), discovery=root.resolve() == SOURCE_ROOT)
+    source_files(
+        root,
+        load_manifest(manifest),
+        discovery=root.resolve() == SOURCE_ROOT,
+    )
+
+
+def distribution_identity(source: dict[str, str]) -> tuple[str, str, str, str]:
+    project = source.get("pyproject.toml", "")
+    name = re.search(r'^name\s*=\s*"([^"]+)"', project, re.M)
+    version = re.search(r'^version\s*=\s*"([^"]+)"', project, re.M)
+    if not name or not version:
+        raise GuardError("cannot determine staged distribution identity")
+    distribution = name.group(1).replace("-", "_")
+    package = distribution
+    source_package = package
+    if not any(path.startswith(package + "/") for path in source):
+        source_package = "src/" + package
+    if not any(path.startswith(source_package + "/") for path in source):
+        raise GuardError("cannot determine staged package root")
+    return distribution, package, source_package, version.group(1)
 
 
 def wheel_guard(path: Path, source: dict[str, str]) -> None:
@@ -249,10 +269,8 @@ def wheel_guard(path: Path, source: dict[str, str]) -> None:
     file_members: set[str] = set()
     package_members: set[str] = set()
     record_name = None
-    version = re.search(r"^version\s*=\s*\"([^\"]+)\"", source["pyproject.toml"], re.M)
-    if not version:
-        raise GuardError("cannot determine staged version")
-    dist_root = f"badass_runner-{version.group(1)}.dist-info"
+    distribution, package, source_package, version = distribution_identity(source)
+    dist_root = f"{distribution}-{version}.dist-info"
     allowed_metadata = {
         f"{dist_root}/licenses/LICENSE",
         f"{dist_root}/METADATA",
@@ -261,11 +279,12 @@ def wheel_guard(path: Path, source: dict[str, str]) -> None:
         f"{dist_root}/top_level.txt",
         f"{dist_root}/RECORD",
     }
-    expected_files = {
-        name
+    package_source = {
+        f"{package}/{name.removeprefix(source_package + '/')}" : name
         for name in source
-        if name.startswith("badass_runner/") and name.endswith(".py")
-    } | allowed_metadata
+        if name.startswith(source_package + "/") and name.endswith(".py")
+    }
+    expected_files = set(package_source) | allowed_metadata
     allowed_directories = {
         parent.as_posix()
         for name in expected_files
@@ -290,16 +309,16 @@ def wheel_guard(path: Path, source: dict[str, str]) -> None:
                 raise GuardError(f"non-regular wheel member: {name}")
             file_members.add(name)
             if not (
-                parts[0] == "badass_runner"
+                parts[0] == package
                 or parts[0] == dist_root
             ):
                 raise GuardError(f"unexpected wheel member: {name}")
-            if parts[0] == "badass_runner":
-                if not name.endswith(".py") or name not in source:
+            if parts[0] == package:
+                if not name.endswith(".py") or name not in package_source:
                     raise GuardError(f"unexpected wheel package member: {name}")
                 text = archive.read(info).decode("utf-8")
                 scan_text(text, name, True)
-                if text != source[name]:
+                if text != source[package_source[name]]:
                     raise GuardError(f"wheel source differs from manifest: {name}")
                 package_members.add(name)
             elif parts[0] == dist_root:
@@ -314,7 +333,7 @@ def wheel_guard(path: Path, source: dict[str, str]) -> None:
                         raise GuardError(f"undecodable wheel member: {name}") from exc
             else:
                 raise GuardError(f"unexpected wheel member: {name}")
-        if package_members != {name for name in source if name.startswith("badass_runner/") and name.endswith(".py")}:
+        if package_members != set(package_source):
             raise GuardError("wheel package does not exactly match source manifest")
         if not record_name:
             raise GuardError("wheel has no RECORD")
@@ -339,20 +358,22 @@ def wheel_guard(path: Path, source: dict[str, str]) -> None:
                 raise GuardError(f"RECORD mismatch for {member}")
 
 
-def sdist_guard(path: Path, source: dict[str, str]) -> None:
-    version = re.search(r"^version\s*=\s*\"([^\"]+)\"", source["pyproject.toml"], re.M)
-    if not version:
-        raise GuardError("cannot determine version")
-    root = f"badass_runner-{version.group(1)}"
+def sdist_guard(path: Path, source: dict[str, str], patterns: set[str]) -> None:
+    distribution, _package, source_package, version = distribution_identity(source)
+    root = f"{distribution}-{version}"
+    egg_info_root = (
+        ("src/" if source_package.startswith("src/") else "")
+        + f"{distribution}.egg-info"
+    )
     generated_files = {
         "PKG-INFO",
         "setup.cfg",
-        "badass_runner.egg-info/PKG-INFO",
-        "badass_runner.egg-info/SOURCES.txt",
-        "badass_runner.egg-info/dependency_links.txt",
-        "badass_runner.egg-info/entry_points.txt",
-        "badass_runner.egg-info/requires.txt",
-        "badass_runner.egg-info/top_level.txt",
+        f"{egg_info_root}/PKG-INFO",
+        f"{egg_info_root}/SOURCES.txt",
+        f"{egg_info_root}/dependency_links.txt",
+        f"{egg_info_root}/entry_points.txt",
+        f"{egg_info_root}/requires.txt",
+        f"{egg_info_root}/top_level.txt",
     }
     possible_files = set(source) | generated_files
     allowed_directories = {root} | {
@@ -383,7 +404,7 @@ def sdist_guard(path: Path, source: dict[str, str]) -> None:
                 raise GuardError(f"unexpected sdist file at root: {name}")
             # setuptools places generated PKG-INFO at the sdist root as well.
             generated_metadata = rel in generated_files
-            if not generated_metadata and not allowed(rel, load_manifest()):
+            if not generated_metadata and not allowed(rel, patterns):
                 raise GuardError(f"unexpected sdist member: {rel}")
             data = archive.extractfile(info)
             if data is None:
@@ -397,7 +418,11 @@ def sdist_guard(path: Path, source: dict[str, str]) -> None:
                 raise GuardError(f"sdist source differs from manifest: {rel}")
             if not generated_metadata and rel.endswith(".py"):
                 package_members.add(rel)
-    if package_members != {name for name in source if name.startswith("badass_runner/") and name.endswith(".py")}:
+    if package_members != {
+        name
+        for name in source
+        if name.startswith(source_package + "/") and name.endswith(".py")
+    }:
         raise GuardError("sdist package does not exactly match source manifest")
 
 
@@ -408,23 +433,26 @@ def main(argv: list[str] | None = None) -> int:
     stage_p.add_argument("destination", type=Path)
     source_p = sub.add_parser("source")
     source_p.add_argument("directory", type=Path, nargs="?", default=SOURCE_ROOT)
+    source_p.add_argument("--manifest", type=Path, default=MANIFEST)
     artifact_p = sub.add_parser("artifact")
     artifact_p.add_argument("--source", required=True, type=Path)
+    artifact_p.add_argument("--manifest", type=Path, default=MANIFEST)
     artifact_p.add_argument("artifacts", nargs="+", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "stage":
             stage(args.destination)
         elif args.command == "source":
-            guard_source(args.directory)
+            guard_source(args.directory, args.manifest)
         else:
             # Build tools add build/dist/egg-info after the prior strict source gate.
-            source = source_files(args.source, load_manifest(), discovery=True)
+            patterns = load_manifest(args.manifest)
+            source = source_files(args.source, patterns, discovery=True)
             for artifact in args.artifacts:
                 if artifact.suffix == ".whl":
                     wheel_guard(artifact, source)
                 elif artifact.name.endswith((".tar.gz", ".tgz", ".tar")):
-                    sdist_guard(artifact, source)
+                    sdist_guard(artifact, source, patterns)
                 else:
                     raise GuardError(f"unsupported artifact: {artifact}")
     # Scanner implementation errors must never turn a release check into a pass.

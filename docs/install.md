@@ -12,7 +12,7 @@ The connector depends only on:
 - [`click`](https://click.palletsprojects.com/) ≥ 8.0 — CLI framework
 - [`httpx`](https://www.python-httpx.org/) ≥ 0.28.0 — HTTP client
 - [`pydantic`](https://docs.pydantic.dev/) = 2.12.5 — strict wire-contract validation
-- `badass-runner-protocol` = 0.1.0 — public runner/cloud protocol contracts
+- `badass-runner-protocol` = 0.2.0 — public runner/cloud protocol contracts
 
 All dependencies are installed automatically.
 
@@ -55,7 +55,7 @@ pip install -e ".[dev]"
 
 ```bash
 badass-runner --version
-# badass-runner, version 0.4.2
+# badass-runner, version 0.5.0
 ```
 
 ```bash
@@ -110,6 +110,30 @@ badass-runner start \
   --token badass_reg_<one-time-token> \
   --server-url https://badass-sec.com
 ```
+
+---
+
+## Provision Mode-2 credentials locally
+
+Runner registration is token-only: create an account-owned one-time token in
+BADASS Cloud, then use `badass-runner start --token …`. There is no browser
+pairing or login flow.
+
+Credentials for Mode-2 protected operations are provisioned on the runner host,
+not through the cloud dashboard:
+
+```bash
+badass-runner cred set --target-ref TARGET_ID --context admin --auth-type bearer
+badass-runner cred list
+badass-runner cred remove --target-ref TARGET_ID --context admin
+```
+
+`cred set` uses a hidden prompt by default. For automation, use
+`--secret-stdin` or `--secret-env-file PATH`; credential values are never
+accepted through command-line arguments. Values are stored in the OS keyring,
+and the local mode-0600 index stores only non-secret references and auth
+metadata. Schema-3 jobs carry opaque references that the runner resolves
+locally; only sanitized observations are uploaded.
 
 ---
 

@@ -12,16 +12,24 @@ matching, PASS/FAIL decisions) is **not** duplicated here; it stays on
 BADASS Cloud.
 """
 import json
+import base64
+import re
 import time
-from typing import Any, Dict, List, Optional
+from http.cookies import SimpleCookie
+from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote, quote_plus
 
 import httpx
 
 from ..target.builder import LocalAuthStore
+from ..target.credentials import LocalCredential, MultiContextCredentialStore
 from ..logs import get_logger, log
 from badass_runner_protocol import (
     _denial_code,
     deserialize_enforcement_probe,
+    runner_referenced_execution_plan_from_wire,
+    sanitize_enforcement_observations,
+    target_scope_ref,
 )
 
 logger = get_logger()
@@ -32,6 +40,121 @@ DEFAULT_INTER_STEP_DELAY = 0.5
 MAX_ENFORCEMENT_RESPONSE_BYTES = 4096
 
 _HTML_MARKERS = ["@vite/client", "@react-refresh", "<head", "<body", "<!doctype html"]
+_HTTP_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_HTTP_HEADER_VALUE = re.compile(br"([^\x00\s]+(?:[ \t]+[^\x00\s]+)*)?")
+_FORBIDDEN_CREDENTIAL_HEADER_NAMES = {b"content-length", b"host", b"transfer-encoding"}
+
+
+class CredentialResolutionError(ValueError):
+    """A reference plan cannot safely be executed with local credentials."""
+
+
+def _validate_credential(credential: LocalCredential) -> None:
+    """Validate resolved metadata without materializing a credential header."""
+    if (
+        credential.auth_type not in {"bearer", "basic", "api_key", "cookie"}
+        or not credential.credential_value
+        or (credential.auth_type == "api_key" and not credential.header_name)
+    ):
+        raise CredentialResolutionError("credential not provisioned for referenced context")
+
+
+def _credential_headers(
+    credential: LocalCredential, header_overrides: Dict[str, str],
+) -> Dict[str, str]:
+    """Build one current-leg header set in memory only."""
+    _validate_credential(credential)
+    return LocalAuthStore(
+        target_id=credential.target_ref,
+        auth_type=credential.auth_type,
+        credential_value=credential.credential_value,
+        header_name=credential.header_name,
+    ).apply_to_headers(header_overrides)
+
+
+def _credential_redaction_literals(credential: LocalCredential) -> List[str]:
+    """Return raw, injected, and safely-derived forms that a target may echo.
+
+    Targets and intermediary diagnostics sometimes render a header in URL
+    encoded form.  Include both standard encodings before observations cross
+    the runner boundary; this remains local-only derived data.
+    """
+    _validate_credential(credential)
+    raw = credential.credential_value or ""
+    literals = [raw]
+    injected = _credential_headers(credential, {})
+    try:
+        literals.extend(injected.values())
+    finally:
+        injected.clear()
+    if credential.auth_type == "cookie":
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw)
+            for morsel in cookie.values():
+                literals.extend((morsel.value, morsel.coded_value))
+        except (TypeError, ValueError):
+            pass
+        # SimpleCookie may reject an entire non-standard cookie string. Treat
+        # every name=value segment conservatively so an echoed value is still
+        # redacted even when the target accepts syntax the parser does not.
+        for segment in raw.split(";"):
+            _, separator, value = segment.partition("=")
+            if separator and value.strip():
+                literals.append(value.strip().strip('"'))
+    elif credential.auth_type == "basic":
+        try:
+            decoded = base64.b64decode(raw, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            decoded = ""
+        if decoded:
+            literals.append(decoded)
+            username, separator, password = decoded.partition(":")
+            if username:
+                literals.append(username)
+            if separator and password:
+                literals.append(password)
+    literals.extend(
+        encoded
+        for value in list(literals)
+        for encoded in (quote(value, safe=""), quote_plus(value, safe=""))
+    )
+    return list(dict.fromkeys(value for value in literals if value))
+
+
+def _transport_validate_headers(
+    credential: Optional[LocalCredential], overrides: Dict[str, str],
+) -> None:
+    """Materialize and validate one full leg header set without sending it."""
+    headers: Dict[str, str] = {}
+    transport_headers = None
+    try:
+        headers = (
+            _credential_headers(credential, dict(overrides))
+            if credential is not None else dict(overrides)
+        )
+        if any(
+            not _HTTP_HEADER_NAME.fullmatch(name)
+            or any(char in name or char in value for char in "\r\n\0")
+            for name, value in headers.items()
+        ):
+            raise ValueError("invalid HTTP header")
+        transport_headers = httpx.Headers(headers)
+        raw_headers = tuple(transport_headers.raw)
+        if any(
+            name.lower() in _FORBIDDEN_CREDENTIAL_HEADER_NAMES
+            or _HTTP_HEADER_VALUE.fullmatch(value) is None
+            for name, value in raw_headers
+        ):
+            raise ValueError("invalid HTTP header")
+    except Exception:
+        raise CredentialResolutionError(
+            "invalid referenced credential headers"
+        ) from None
+    finally:
+        if transport_headers is not None:
+            transport_headers.clear()
+        headers.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +394,11 @@ class LocalTestExecutor:
                     time.sleep(self.inter_step_delay)
         return observations
 
-    def execute_enforcement_probe(self, payload: dict) -> List[Dict[str, Any]]:
+    def execute_enforcement_probe(
+        self,
+        payload: dict,
+        leg_header_builder: Optional[Callable[[dict, bool], Dict[str, str]]] = None,
+    ) -> List[Dict[str, Any]]:
         """Execute probe legs and return raw observations, never a verdict."""
         probe = deserialize_enforcement_probe(payload)
         method = (probe["method"] or self.method or "POST").upper()
@@ -343,15 +470,24 @@ class LocalTestExecutor:
             authorized_headers = self.auth_store.apply_to_headers(
                 authorized_headers
             ) if self.auth_store else authorized_headers
-            for authorized, headers in (
+            for authorized, default_headers in (
                 (True, authorized_headers),
                 (False, dict(variant["headers"])),
             ):
+                # Referenced credentials are injected only immediately before
+                # their own request, then cleared in finally below.
+                headers: Dict[str, str] = {}
+                request_headers: Dict[str, str] = {}
                 try:
+                    headers = (
+                        leg_header_builder(variant, authorized)
+                        if leg_header_builder else default_headers
+                    )
+                    request_headers = dict(headers)
                     request_kwargs = {
                         "method": method,
                         "url": self._url(probe["path"]),
-                        "headers": dict(headers),
+                        "headers": request_headers,
                     }
                     if method in {"GET", "HEAD"}:
                         request_kwargs["params"] = body
@@ -408,7 +544,135 @@ class LocalTestExecutor:
                             "error": f"Connection error: {exc}",
                         }
                     )
+                finally:
+                    request_headers.clear()
+                    headers.clear()
         return observations
+
+    def resolve_referenced_enforcement_probe(
+        self, payload: dict, credential_store: MultiContextCredentialStore,
+        target_ref: Optional[str],
+    ) -> tuple[dict, Dict[str, LocalCredential], List[str]]:
+        """Resolve every schema-3 reference before any target HTTP is attempted.
+
+        The returned schema-2-shaped dictionary is an in-memory execution
+        artifact only; credential values are never serialized or logged.
+        """
+        if not isinstance(credential_store, MultiContextCredentialStore):
+            raise CredentialResolutionError("credential store unavailable for referenced context")
+        if not isinstance(target_ref, str) or not target_ref:
+            raise CredentialResolutionError("target_ref is required for referenced credential plan")
+        try:
+            plan = runner_referenced_execution_plan_from_wire(payload)
+        except ValueError as exc:
+            raise CredentialResolutionError("invalid referenced credential plan") from exc
+
+        refs = [plan.authorized_credential_ref] + [
+            variant.credential_ref for variant in plan.unauthorized_variants
+        ]
+        resolved: Dict[str, LocalCredential] = {}
+        loaded_credentials: List[LocalCredential] = []
+        secrets: List[str] = []
+        try:
+            for ref in refs:
+                if ref is None:
+                    continue
+                if ref in resolved:
+                    continue
+                try:
+                    credential = credential_store.get_by_ref(ref)
+                except Exception:
+                    raise CredentialResolutionError(
+                        "credential not provisioned for referenced context"
+                    ) from None
+                if credential is not None:
+                    loaded_credentials.append(credential)
+                if (
+                    credential is None
+                    or credential.ref != ref
+                    or target_scope_ref(credential.target_ref) != target_ref
+                ):
+                    raise CredentialResolutionError(
+                        "credential not provisioned for referenced context"
+                    )
+                resolved[ref] = credential
+                secrets.extend(_credential_redaction_literals(credential))
+
+            variants = [{
+                "name": variant.name,
+                "headers": dict(variant.header_overrides),
+                "request_body": (
+                    dict(variant.request_body)
+                    if variant.request_body is not None else None
+                ),
+                "non_mutating": variant.non_mutating,
+                "requires_isolated_fixture": variant.requires_isolated_fixture,
+            } for variant in plan.unauthorized_variants]
+            for variant in plan.unauthorized_variants:
+                _transport_validate_headers(
+                    resolved.get(plan.authorized_credential_ref),
+                    dict(plan.authorized_header_overrides),
+                )
+                _transport_validate_headers(
+                    resolved.get(variant.credential_ref),
+                    dict(variant.header_overrides),
+                )
+        except Exception:
+            for credential in loaded_credentials:
+                credential.credential_value = None
+            loaded_credentials.clear()
+            resolved.clear()
+            secrets.clear()
+            raise
+
+        return {
+            "schema_version": 2,
+            "path": plan.path,
+            "method": plan.method,
+            "request_body": dict(plan.request_body),
+            "authorized_headers": dict(plan.authorized_header_overrides),
+            "non_mutating": plan.non_mutating,
+            "requires_isolated_fixture": plan.requires_isolated_fixture,
+            "isolated_fixture": plan.isolated_fixture,
+            "unauthorized_variants": variants,
+        }, resolved, list(dict.fromkeys(secrets))
+
+    def execute_referenced_enforcement_probe(
+        self, payload: dict, credential_store: MultiContextCredentialStore,
+        target_ref: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Resolve, execute, and sanitize schema-3 evidence in one boundary."""
+        resolved_probe, resolved, secrets = self.resolve_referenced_enforcement_probe(
+            payload, credential_store, target_ref
+        )
+        plan = runner_referenced_execution_plan_from_wire(payload)
+        variants = {variant.name: variant for variant in plan.unauthorized_variants}
+
+        def _headers(variant: dict, authorized: bool) -> Dict[str, str]:
+            if authorized:
+                ref, overrides = (
+                    plan.authorized_credential_ref, plan.authorized_header_overrides
+                )
+            else:
+                item = variants[variant["name"]]
+                ref, overrides = item.credential_ref, item.header_overrides
+            return (
+                _credential_headers(resolved[ref], dict(overrides))
+                if ref is not None else dict(overrides)
+            )
+
+        raw_observations: List[Dict[str, Any]] = []
+        try:
+            raw_observations = self.execute_enforcement_probe(
+                resolved_probe, leg_header_builder=_headers
+            )
+            return sanitize_enforcement_observations(raw_observations, secrets)
+        finally:
+            raw_observations.clear()
+            for credential in resolved.values():
+                credential.credential_value = None
+            resolved.clear()
+            secrets.clear()
 
     # ------------------------------------------------------------------
     # Single-step execution

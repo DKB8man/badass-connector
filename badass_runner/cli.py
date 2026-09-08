@@ -34,6 +34,11 @@ from .harness.job_poller import JobPoller
 from .logs import get_logger, log
 from .recorder_cli import recorder_group
 from .status_server import LocalStatusServer
+from .target.credentials import (
+    CredentialStorageError,
+    LocalCredential,
+    MultiContextCredentialStore,
+)
 
 logger = get_logger()
 
@@ -128,6 +133,105 @@ def main() -> None:
 
 
 main.add_command(recorder_group)
+
+
+# ---------------------------------------------------------------------------
+# credential provisioning (secrets are deliberately not CLI options)
+# ---------------------------------------------------------------------------
+
+@main.group("cred")
+def cred_group() -> None:
+    """Provision runner-local target credentials in the OS keyring."""
+
+
+def _read_credential_secret(secret_stdin: bool, secret_env_file: Optional[Path]) -> str:
+    """Read a secret without ever accepting it through command-line argv."""
+    if secret_stdin and secret_env_file:
+        raise click.UsageError("Use only one of --secret-stdin or --secret-env-file.")
+    if secret_stdin:
+        secret = click.get_text_stream("stdin").read().rstrip("\r\n")
+    elif secret_env_file:
+        try:
+            secret = secret_env_file.read_text(encoding="utf-8").rstrip("\r\n")
+        except OSError as exc:
+            raise click.ClickException(f"Cannot read secret env-file: {exc}") from exc
+    else:
+        secret = click.prompt("Credential secret", hide_input=True, confirmation_prompt=True)
+    if not secret:
+        raise click.UsageError("Credential secret must not be empty.")
+    return secret
+
+
+@cred_group.command("set")
+@click.option("--target-ref", "--target", required=True, help="Cloud target reference/ID.")
+@click.option("--context", "--context-key", "context_key", required=True, help="Credential context key.")
+@click.option(
+    "--auth-type", required=True,
+    type=click.Choice(["bearer", "basic", "api_key", "api-key", "cookie", "header"]),
+    help="How this locally held credential is used.",
+)
+@click.option("--header-name", default=None, help="Header name for api_key or header auth.")
+@click.option("--secret-stdin", is_flag=True, help="Read the secret from standard input.")
+@click.option(
+    "--secret-env-file", type=click.Path(path_type=Path),
+    help="Read the secret from a local env-file (its complete contents).",
+)
+@click.option(
+    "--store", "store_path", type=click.Path(path_type=Path), default=None,
+    help="Metadata index path (contains no secret values).",
+)
+def cred_set(
+    target_ref: str, context_key: str, auth_type: str, header_name: Optional[str],
+    secret_stdin: bool, secret_env_file: Optional[Path], store_path: Optional[Path],
+) -> None:
+    """Store one target/context secret in the OS keyring."""
+    if auth_type in {"api_key", "api-key", "header"} and not header_name:
+        raise click.UsageError("--header-name is required for api_key or header auth.")
+    auth_type = {"api-key": "api_key", "header": "api_key"}.get(auth_type, auth_type)
+    secret = _read_credential_secret(secret_stdin, secret_env_file)
+    try:
+        store = MultiContextCredentialStore(store_path)
+        credential = LocalCredential(
+            target_ref=target_ref, context_key=context_key, auth_type=auth_type,
+            header_name=header_name, credential_value=secret,
+        )
+        store.set(credential)
+    except (CredentialStorageError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Credential provisioned for target '{target_ref}' context '{context_key}'.")
+
+
+@cred_group.command("list")
+@click.option("--store", "store_path", type=click.Path(path_type=Path), default=None)
+def cred_list(store_path: Optional[Path]) -> None:
+    """List provisioned credential metadata, never credential values."""
+    try:
+        entries = MultiContextCredentialStore(store_path).list_metadata()
+    except CredentialStorageError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not entries:
+        click.echo("No local credentials provisioned.")
+        return
+    for entry in entries:
+        click.echo(
+            f"{entry['target_ref']}\t{entry['context_key']}\t{entry['auth_type']}"
+            f"\thas-credential={entry['has_credential']}"
+        )
+
+
+@cred_group.command("remove")
+@click.option("--target-ref", "--target", required=True, help="Cloud target reference/ID.")
+@click.option("--context", "--context-key", "context_key", required=True, help="Credential context key.")
+@click.option("--store", "store_path", type=click.Path(path_type=Path), default=None)
+def cred_remove(target_ref: str, context_key: str, store_path: Optional[Path]) -> None:
+    """Delete one locally provisioned target/context credential."""
+    try:
+        removed = MultiContextCredentialStore(store_path).remove(target_ref, context_key)
+    except CredentialStorageError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not removed:
+        raise click.ClickException("No credential is provisioned for that target/context.")
+    click.echo(f"Credential removed for target '{target_ref}' context '{context_key}'.")
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +388,8 @@ def start(
 
     poller = JobPoller(
         client=client,
+        # Metadata only is loaded here.  Reference resolution/execution is R5-C.
+        auth_store=MultiContextCredentialStore(),
         on_job_start=_on_job_start,
         on_job_complete=_on_job_complete,
     )

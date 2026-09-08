@@ -22,10 +22,11 @@
     "badass_runner/recorder/storage.py",
     "badass_runner/target/__init__.py",
     "badass_runner/target/builder.py",
+    "badass_runner/target/credentials.py",
     "badass_runner/target/validator.py"
   ],
   "root_files": ["pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md"],
   "docs": ["docs/**/*.md"],
-  "guard_scripts": ["scripts/export_guard.py", "scripts/export_allowlist.json", "scripts/release_gate.py"],
+  "guard_scripts": ["scripts/export_guard.py", "scripts/export_allowlist.json", "scripts/protocol_export_allowlist.json", "scripts/release_gate.py"],
   "ci": [".github/workflows/test.yml"]
 }

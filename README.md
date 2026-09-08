@@ -30,7 +30,8 @@ Many AI systems under test run behind:
 
 BADASS Cloud cannot reach these endpoints directly. The connector solves this by running **inside** your network and pulling jobs from the cloud rather than receiving inbound traffic.
 
-Your endpoint never needs a public IP address. Your credentials never leave your machine.
+Your endpoint never needs a public IP address. For Mode-2 protected operations,
+credentials provisioned into the runner-local store never leave that machine.
 
 ---
 
@@ -118,7 +119,19 @@ The connector targets any HTTP endpoint that accepts a text message and returns 
 | Response field | `reply` |
 | Auth type | `bearer` / `api_key` / `none` |
 
-Credentials (API keys, Bearer tokens) are stored in the connector's **local auth store** on your machine and looked up at runtime. They are never sent to the cloud. See [Where credentials live](#where-credentials-live) below.
+For Mode-2 protected operations, provision credentials into the connector's
+**local OS-keyring-backed store**:
+
+```bash
+badass-runner cred set --target-ref TARGET_ID --context admin --auth-type bearer
+badass-runner cred list
+```
+
+The cloud sends only opaque credential references in schema-3 enforcement
+plans. The runner resolves them locally at execution time and uploads only
+sanitized observations. Credential values are never sent to the cloud. See
+[Where credentials live](#where-credentials-live) and
+[Runner-local credentials](docs/credentials.md).
 
 ---
 
@@ -155,7 +168,18 @@ All connector state is stored in `~/.badass-runner/` (overridable with `$BADASS_
 - `runner_id` — your runner's UUID assigned by the cloud
 - `runner_token` — the long-lived bearer token used to authenticate job polls and result uploads
 
-**Your API keys and endpoint credentials are never written to `config.json`.** They are managed separately through the BADASS Cloud dashboard and resolved by the connector at job execution time from your local auth store.
+**Your API keys and endpoint credentials are never written to `config.json`.**
+For Mode 2, you provision them directly on the runner host with
+`badass-runner cred set`; values are stored in the OS keyring, while a separate
+mode-0600 JSON index contains only target/context references and auth metadata.
+Use `badass-runner cred list` to inspect that metadata and
+`badass-runner cred remove` to delete a local credential. Secrets are entered
+through a hidden prompt, standard input, or a local env-file—never through
+command-line arguments.
+
+Mode 1 remains separate: cloud-direct testing uses credentials held by BADASS
+Cloud for cloud-side requests. The local-only guarantee above applies to
+runner-local Mode-2 credentials.
 
 ---
 
@@ -197,6 +221,9 @@ See [docs/security-model.md](docs/security-model.md) for the full technical desc
 | `badass-runner start` | Start a previously registered connector (foreground) |
 | `badass-runner status` | Show whether a connector process is running locally |
 | `badass-runner stop` | Send SIGTERM to the running connector |
+| `badass-runner cred set …` | Provision a target/context credential into the local OS keyring |
+| `badass-runner cred list` | List local credential metadata without displaying values |
+| `badass-runner cred remove …` | Remove a target/context credential from the local store |
 | `badass-runner recorder` | HTTP traffic recorder for endpoint discovery |
 | `badass-runner --version` | Print connector version |
 | `badass-runner --help` | Show all commands and options |
