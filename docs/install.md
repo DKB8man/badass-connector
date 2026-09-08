@@ -55,7 +55,7 @@ pip install -e ".[dev]"
 
 ```bash
 badass-runner --version
-# badass-runner, version 0.4.0
+# badass-runner, version 0.4.2
 ```
 
 ```bash

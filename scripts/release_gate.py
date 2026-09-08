@@ -27,6 +27,8 @@ REPOSITORY = RUNNER.parent
 PROTOCOL = REPOSITORY / "badass-runner-protocol"
 GUARD = RUNNER / "scripts" / "export_guard.py"
 EPOCH = "1704067200"
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_EXPANDED_BYTES = 100 * 1024 * 1024
 
 
 class GateError(RuntimeError):
@@ -124,8 +126,11 @@ def safe_member(name: str) -> str:
 
 def artifact_manifest(path: Path, distribution: str, kind: str, version: str) -> dict[str, Any]:
     members: list[dict[str, Any]] = []
+    expanded = 0
     if kind == "wheel":
         with zipfile.ZipFile(path) as archive:
+            if len(archive.infolist()) > MAX_ARCHIVE_MEMBERS:
+                raise GateError(f"wheel has too many members: {path.name}")
             for info in archive.infolist():
                 mode = (info.external_attr >> 16) & 0o170000
                 member_type = "directory" if info.is_dir() else "file"
@@ -133,17 +138,39 @@ def artifact_manifest(path: Path, distribution: str, kind: str, version: str) ->
                     raise GateError(f"unsafe wheel member type: {info.filename}")
                 if member_type == "directory" and mode not in (0, 0o040000):
                     raise GateError(f"unsafe wheel member type: {info.filename}")
-                data = b"" if member_type == "directory" else archive.read(info)
+                if info.file_size > MAX_EXPANDED_BYTES - expanded:
+                    raise GateError(f"wheel expanded size exceeds limit: {path.name}")
+                if member_type == "directory":
+                    data = b""
+                else:
+                    with archive.open(info) as stream:
+                        data = stream.read(MAX_EXPANDED_BYTES - expanded + 1)
+                    if len(data) > MAX_EXPANDED_BYTES - expanded:
+                        raise GateError(
+                            f"wheel expanded size exceeds limit: {path.name}"
+                        )
+                expanded += len(data)
                 members.append({"path": safe_member(info.filename), "type": member_type,
                                 "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
     else:
         with tarfile.open(path, "r:*") as archive:
-            for info in archive.getmembers():
+            for member_count, info in enumerate(archive, start=1):
+                if member_count > MAX_ARCHIVE_MEMBERS:
+                    raise GateError(f"sdist has too many members: {path.name}")
                 if not (info.isfile() or info.isdir()):
                     raise GateError(f"unsafe sdist member type: {info.name}")
                 member_type = "file" if info.isfile() else "directory"
+                if info.size > MAX_EXPANDED_BYTES - expanded:
+                    raise GateError(f"sdist expanded size exceeds limit: {path.name}")
                 extracted = archive.extractfile(info) if info.isfile() else None
-                data = extracted.read() if extracted else b""
+                data = (
+                    extracted.read(MAX_EXPANDED_BYTES - expanded + 1)
+                    if extracted
+                    else b""
+                )
+                if len(data) > MAX_EXPANDED_BYTES - expanded:
+                    raise GateError(f"sdist expanded size exceeds limit: {path.name}")
+                expanded += len(data)
                 members.append({"path": safe_member(info.name), "type": member_type,
                                 "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
     if len({m["path"] for m in members}) != len(members):
@@ -197,7 +224,7 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
              *(str(p) for p in runner_files)], RUNNER)
         records: dict[str, dict[str, Any]] = {}
         for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.1.0"),
-                                               ("badass-runner", runner_out, "0.4.0")):
+                                               ("badass-runner", runner_out, "0.4.2")):
             files = built_artifacts(folder, distribution)
             for source in files:
                 kind = "wheel" if source.suffix == ".whl" else "sdist"
@@ -295,7 +322,7 @@ except ValueError: pass
 else: raise AssertionError("protocol accepted unknown field")
 entrypoint = pathlib.Path(sys.executable).with_name("badass-runner")
 version = subprocess.run([str(entrypoint),"--version"], check=True, text=True, capture_output=True)
-assert version.stdout.strip() == "badass-runner, version 0.4.0"
+assert version.stdout.strip() == "badass-runner, version 0.4.2"
 help_result = subprocess.run([str(entrypoint),"--help"], check=True, text=True, capture_output=True)
 assert "Commands:" in help_result.stdout and "start" in help_result.stdout
 """

@@ -7,6 +7,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.2] — 2026-09-08
+
+### Changed
+
+- Added the package README as the PyPI long description.
+- Clarified the runner's outbound-only connection model, behavioral-testing
+  scope, token-based registration, and redacted result handling.
+- Added fail-closed reuse of an already-published, content-equivalent protocol
+  release for runner-only patch publication.
+
+---
+
+## [0.4.1] — 2026-09-08
+
+### Release status
+
+- Not published. Its immutable private release tag completed only the guarded
+  dry-run, preflight, and public protocol resolution stages; no public
+  repository or PyPI mutation occurred.
+
+---
+
 ## [0.4.0] — 2026-09-07
 
 ### Changed

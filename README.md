@@ -1,14 +1,23 @@
-# BADASS Connector
+# BADASS Local Runner
 
-> **Connect your local or private AI endpoints to BADASS Cloud for adversarial security testing.**
+> **Securely connect private AI endpoints to BADASS Cloud for authorized behavioral security testing.**
 
 ---
 
 ## What it is
 
-The BADASS Connector (`badass-runner`) is a lightweight Python agent you run on your own machine or server. It creates a secure, outbound-only channel between a local AI endpoint and the BADASS Cloud testing platform.
+The BADASS Local Runner (`badass-runner`) connects AI endpoints inside your
+private network to BADASS Cloud without requiring them to be publicly
+accessible.
 
-Once connected, BADASS Cloud can dispatch adversarial harness tests against your endpoint, collect sanitized results, and surface findings — all without your endpoint ever being exposed to the public internet.
+The runner establishes an outbound connection, executes authorized behavioral
+security tests locally, and returns structured, redacted results to the BADASS
+dashboard. It supports token-based registration, configurable endpoint access,
+CI and headless environments, and strict protocol validation.
+
+The runner reports observed endpoint behavior. It does not claim that an
+upstream gateway enforced a policy unless that enforcement is independently
+verified.
 
 ## Why it exists
 
