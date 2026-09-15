@@ -35,7 +35,11 @@ from ..target.builder import LocalAuthStore
 from ..target.credentials import MultiContextCredentialStore
 from .executor import LocalTestExecutor
 from .sanitize import sanitize_turns
-from badass_runner_protocol import sanitize_enforcement_observations
+from badass_runner_protocol import (
+    SESSION_IDENTITY_ASSERTION_BADASS_RESET,
+    SESSION_IDENTITY_ASSERTION_NOT_ASSERTED,
+    sanitize_enforcement_observations,
+)
 from badass_runner_protocol import validate_job_envelope, validate_job_results
 
 logger = get_logger()
@@ -217,6 +221,7 @@ class JobPoller:
             steps: List[str] = test.get("steps", [])
             endpoint_path: Optional[str] = test.get("endpoint_path")
             new_session_before: List[int] = test.get("new_session_before") or []
+            session_id_field: Optional[str] = test.get("session_id_field")
             execution_type = test.get("execution_type", "model_turns")
 
             log(logger, "info", "Executing test",
@@ -294,17 +299,27 @@ class JobPoller:
                         "endpoint_path": endpoint_path,
                     })
                 else:
+                    executor.set_session_id_field(session_id_field)
                     raw_turns = executor.execute_test(
                         test_id=test_id,
                         steps=steps,
                         max_turns=max_turns,
                         new_session_before=new_session_before,
                         path_override=endpoint_path,
+                        reset_session_before_first_request=True,
                     )
                     safe_turns = sanitize_turns(raw_turns, auth_secrets)
+                    # This is a runner-side transport assertion only.  It
+                    # never claims that the target itself reset anything.
+                    session_assertion = (
+                        SESSION_IDENTITY_ASSERTION_BADASS_RESET
+                        if executor.last_session_reset_ran
+                        else SESSION_IDENTITY_ASSERTION_NOT_ASSERTED
+                    )
                     results.append({
                         "test_id": test_id,
                         "turns": safe_turns,
+                        "session_identity_assertion": session_assertion,
                         "error": None,
                         "endpoint_path": endpoint_path,
                     })
@@ -335,6 +350,7 @@ class JobPoller:
                     results.append({
                         "test_id": test_id,
                         "turns": [],
+                        "session_identity_assertion": SESSION_IDENTITY_ASSERTION_NOT_ASSERTED,
                         "error": err_msg,
                         "endpoint_path": endpoint_path,
                     })

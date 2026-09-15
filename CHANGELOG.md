@@ -7,6 +7,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.1] — 2026-09-14
+
+### Fixed
+
+- Local and private target requests no longer inherit ambient operating-system
+  proxy settings, preventing macOS system proxies from turning reachable
+  loopback targets into misleading connection-refused failures.
+- Connection failures now report when relevant system proxy settings were
+  detected and deliberately bypassed without exposing proxy URLs or credentials.
+
+### Notes
+
+- Explicit per-target proxy routing remains a future Mode 2 capability for
+  targets that are intentionally reachable only through an internal gateway.
+
+---
+
 ## [0.4.2] — 2026-09-08
 
 ### Changed

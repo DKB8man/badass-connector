@@ -23,6 +23,7 @@ import httpx
 
 from ..target.builder import LocalAuthStore
 from ..target.credentials import LocalCredential, MultiContextCredentialStore
+from ..target.proxy import bypassed_system_proxy_note
 from ..logs import get_logger, log
 from badass_runner_protocol import (
     _denial_code,
@@ -341,6 +342,7 @@ class LocalTestExecutor:
         extra_body_fields: Optional[Dict] = None,
         body_format: str = "flat",
         can_cause_side_effects: bool = False,
+        session_id_field: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.message_path = message_path
@@ -353,6 +355,10 @@ class LocalTestExecutor:
         self.extra_body_fields: Dict = extra_body_fields if isinstance(extra_body_fields, dict) else {}
         self.body_format = body_format or "flat"
         self.can_cause_side_effects = bool(can_cause_side_effects)
+        self.session_id_field = session_id_field if isinstance(session_id_field, str) and session_id_field else None
+        self._session_value: Optional[Any] = None
+        self.last_session_reset_ran = False
+        self._suppress_static_session_field = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -367,10 +373,26 @@ class LocalTestExecutor:
         path = (path_override or self.message_path).lstrip("/")
         return self.base_url + "/" + path
 
+    def _reset_session(self) -> None:
+        """Clear carried target state before a fresh model-turn invocation."""
+        self._session_value = None
+        self._suppress_static_session_field = True
+        if self.session_id_field:
+            self.last_session_reset_ran = True
+
+    def set_session_id_field(self, field: Optional[str]) -> None:
+        """Select the carried session field for the next model-turn test."""
+        self.session_id_field = field if isinstance(field, str) and field else None
+        self._session_value = None
+
     def execute_surface_probe(self, paths: List[str]) -> List[Dict[str, Any]]:
         """GET passive routes without auth and return observations, never verdicts."""
         observations: List[Dict[str, Any]] = []
-        with httpx.Client(timeout=self.request_timeout, follow_redirects=False) as client:
+        with httpx.Client(
+            timeout=self.request_timeout,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
             for path in paths:
                 started = time.monotonic()
                 try:
@@ -383,12 +405,13 @@ class LocalTestExecutor:
                         "error": None,
                     })
                 except Exception as exc:
+                    url = self._url(path)
                     observations.append({
                         "path": path,
                         "status_code": 0,
                         "response_excerpt": "",
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "error": str(exc)[:300],
+                        "error": f"{exc}{bypassed_system_proxy_note(url)}"[:300],
                     })
                 if self.inter_step_delay:
                     time.sleep(self.inter_step_delay)
@@ -495,7 +518,9 @@ class LocalTestExecutor:
                         request_kwargs["json"] = body
                         request_kwargs["headers"]["Content-Type"] = "application/json"
                     with httpx.Client(
-                        timeout=self.request_timeout, follow_redirects=False
+                        timeout=self.request_timeout,
+                        follow_redirects=False,
+                        trust_env=False,
                     ) as client:
                         with client.stream(**request_kwargs) as response:
                             body_bytes = bytearray()
@@ -541,7 +566,10 @@ class LocalTestExecutor:
                             "status_code": 0,
                             "response_headers": {},
                             "response_body": "",
-                            "error": f"Connection error: {exc}",
+                            "error": (
+                                f"Connection error: {exc}"
+                                f"{bypassed_system_proxy_note(request_kwargs['url'])}"
+                            ),
                         }
                     )
                 finally:
@@ -695,16 +723,37 @@ class LocalTestExecutor:
         try:
             if self.method in ("GET", "HEAD", "DELETE"):
                 msg_truncated = message[:MAX_GET_MESSAGE_LEN]
-                with httpx.Client(timeout=self.request_timeout, follow_redirects=False) as c:
+                params = {self.request_message_field: msg_truncated}
+                if self.session_id_field and self._session_value is not None:
+                    params[self.session_id_field] = self._session_value
+                with httpx.Client(
+                    timeout=self.request_timeout,
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as c:
                     resp = c.request(
                         method=self.method,
                         url=url,
-                        params={self.request_message_field: msg_truncated},
+                        params=params,
                         headers=auth_hdrs,
                     )
             else:
-                body = {**self.extra_body_fields, self.request_message_field: message}
-                with httpx.Client(timeout=self.request_timeout, follow_redirects=False) as c:
+                body = {
+                    key: value
+                    for key, value in self.extra_body_fields.items()
+                    if not (
+                        self._suppress_static_session_field
+                        and key == self.session_id_field
+                    )
+                }
+                body[self.request_message_field] = message
+                if self.session_id_field and self._session_value is not None:
+                    body[self.session_id_field] = self._session_value
+                with httpx.Client(
+                    timeout=self.request_timeout,
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as c:
                     resp = c.request(
                         method=self.method,
                         url=url,
@@ -723,13 +772,14 @@ class LocalTestExecutor:
             )
         except Exception as exc:
             elapsed_ms = int((time.time() - start) * 1000)
+            proxy_note = bypassed_system_proxy_note(url)
             return StepResult(
                 request=message,
                 response=f"[ERROR] {exc}",
                 raw_reply="",
                 status_code=0,
                 elapsed_ms=elapsed_ms,
-                extraction_error=f"Connection error: {exc}",
+                extraction_error=f"Connection error: {exc}{proxy_note}",
             )
 
         elapsed_ms = int((time.time() - start) * 1000)
@@ -786,6 +836,8 @@ class LocalTestExecutor:
         function_call_raw = None
         try:
             resp_json = resp.json()
+            if self.session_id_field and isinstance(resp_json, dict):
+                self._session_value = resp_json.get(self.session_id_field)
             reply, ext_err = _extract_reply(resp_json, self.response_message_field)
             # Structured tool calls (OpenAI + Anthropic)
             _msg = ((resp_json.get("choices") or [{}])[0]).get("message", {})
@@ -837,6 +889,7 @@ class LocalTestExecutor:
         max_turns: int = 5,
         new_session_before: Optional[List[int]] = None,
         path_override: Optional[str] = None,
+        reset_session_before_first_request: bool = False,
     ) -> List[Dict]:
         """Execute all *steps* for one test and return a list of turn dicts.
 
@@ -849,9 +902,11 @@ class LocalTestExecutor:
         max_turns:
             Hard cap on the number of steps executed (guardrail limit).
         new_session_before:
-            Step indices before which a new session should be started.
-            For the runner, this is informational only (no server-side
-            session management is performed).
+            Step indices before which BADASS's carried session field is cleared.
+            This does not reset target-side server state.
+        reset_session_before_first_request:
+            Clear BADASS's carried session field before this invocation.  The
+            caller may claim runner-side independence only when this ran.
         path_override:
             If supplied, use this path instead of ``self.message_path``.
 
@@ -862,6 +917,11 @@ class LocalTestExecutor:
             format.
         """
         turns: List[Dict] = []
+        self.last_session_reset_ran = False
+        if reset_session_before_first_request:
+            self._reset_session()
+        else:
+            self._suppress_static_session_field = False
         capped = steps[:max_turns]
 
         for i, step in enumerate(capped):
@@ -869,6 +929,10 @@ class LocalTestExecutor:
                 test_id=test_id, step=i, total=len(capped))
             turn = self.send_step(step, path_override=path_override)
             turns.append(turn.to_dict())
+
+            # A reset index starts a new client-side identity before its request.
+            if i + 1 in (new_session_before or []) and i + 1 < len(capped):
+                self._reset_session()
 
             # Stop on connection failure — subsequent steps will also fail
             if turn.status_code == 0:

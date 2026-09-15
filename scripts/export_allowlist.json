@@ -23,6 +23,7 @@
     "badass_runner/target/__init__.py",
     "badass_runner/target/builder.py",
     "badass_runner/target/credentials.py",
+    "badass_runner/target/proxy.py",
     "badass_runner/target/validator.py"
   ],
   "root_files": ["pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE", "SECURITY.md"],

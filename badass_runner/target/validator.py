@@ -41,6 +41,7 @@ from urllib.parse import urlencode, urlparse
 import httpx
 
 from .builder import LocalAuthStore, LocalTarget
+from .proxy import bypassed_system_proxy_note
 
 DEFAULT_PROBE = "What is 2+2?"
 DEFAULT_TIMEOUT = 10  # seconds
@@ -262,6 +263,7 @@ class ValidationPreview:
                 content=body,
                 timeout=self.timeout,
                 follow_redirects=False,   # redirects handled explicitly below
+                trust_env=False,
             )
         except Exception as exc:
             return ValidationResult(
@@ -270,7 +272,7 @@ class ValidationPreview:
                 status_code=0,
                 raw_response={},
                 extracted_response=None,
-                error=str(exc),
+                error=f"{exc}{bypassed_system_proxy_note(url)}",
             )
 
         # ---- origin allowlist: redirect interception --------------------
@@ -316,6 +318,7 @@ class ValidationPreview:
                     content=body,
                     timeout=self.timeout,
                     follow_redirects=False,
+                    trust_env=False,
                 )
             except Exception as exc:
                 return ValidationResult(
@@ -324,7 +327,10 @@ class ValidationPreview:
                     status_code=0,
                     raw_response={},
                     extracted_response=None,
-                    error=f"Error following same-origin redirect to {location!r}: {exc}",
+                    error=(
+                        f"Error following same-origin redirect to {location!r}: {exc}"
+                        f"{bypassed_system_proxy_note(location)}"
+                    ),
                 )
 
         raw: Dict[str, Any] = {}
