@@ -67,6 +67,11 @@ badass-runner --version
 
 See [docs/install.md](docs/install.md) for detailed install options, virtual environment setup, and environment variable reference.
 
+BADASS Cloud supports only the latest published connector. Each connector
+release therefore requires operators to run `pipx upgrade badass-runner`;
+outdated connectors are hard-rejected before job dispatch rather than allowed
+to produce qualified results with a compatibility warning.
+
 ---
 
 ## Quick start

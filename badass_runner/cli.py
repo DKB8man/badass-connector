@@ -62,8 +62,7 @@ def _parse_version(v: str) -> tuple:
 def _check_cloud_version(client: "RunnerClient") -> None:
     """Check connector version compatibility with the cloud.
 
-    * Below ``minimum_runner_version``: print an error and exit(1).
-    * Below ``recommended_runner_version``: print a non-fatal upgrade warning.
+    * Below either advertised version: print an error and exit(1).
     * Endpoint unreachable or missing (old cloud): warn only and continue.
     """
     try:
@@ -83,25 +82,24 @@ def _check_cloud_version(client: "RunnerClient") -> None:
         )
         return
 
-    min_ver = info.get("minimum_runner_version", "")
-    rec_ver = info.get("recommended_runner_version", "")
+    advertised = [
+        value
+        for value in (
+            info.get("minimum_runner_version", ""),
+            info.get("recommended_runner_version", ""),
+        )
+        if value
+    ]
+    required_ver = max(advertised, key=_parse_version) if advertised else ""
 
-    if min_ver and _parse_version(__version__) < _parse_version(min_ver):
+    if required_ver and _parse_version(__version__) < _parse_version(required_ver):
         click.echo(
             f"Error: connector v{__version__} is below the minimum required "
-            f"version v{min_ver}.\n"
-            "Upgrade with:  pip install --upgrade badass-runner",
+            f"version v{required_ver}.\n"
+            "Upgrade with:  pipx upgrade badass-runner",
             err=True,
         )
         sys.exit(1)
-
-    if rec_ver and _parse_version(__version__) < _parse_version(rec_ver):
-        click.echo(
-            f"Warning: connector v{__version__} is below the recommended "
-            f"version v{rec_ver}. "
-            "Consider upgrading: pip install --upgrade badass-runner",
-            err=True,
-        )
 
 
 # ---------------------------------------------------------------------------

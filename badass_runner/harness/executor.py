@@ -15,6 +15,7 @@ import json
 import base64
 import re
 import time
+import uuid
 from http.cookies import SimpleCookie
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, quote_plus
@@ -36,7 +37,11 @@ from badass_runner_protocol import (
 logger = get_logger()
 
 MAX_GET_MESSAGE_LEN = 500
-DEFAULT_REQUEST_TIMEOUT = 15.0
+DEFAULT_REQUEST_TIMEOUT = 30.0
+CONNECT_TIMEOUT = 3.0
+WRITE_TIMEOUT = 10.0
+POOL_TIMEOUT = 3.0
+REQUEST_ID_HEADER = "X-BADASS-Request-ID"
 DEFAULT_INTER_STEP_DELAY = 0.5
 MAX_ENFORCEMENT_RESPONSE_BYTES = 4096
 
@@ -264,6 +269,7 @@ class StepResult:
         function_call_raw: Optional[dict] = None,
         html_shell: bool = False,
         content_type: str = "",
+        diagnostics: Optional[Dict[str, Any]] = None,
     ):
         self.request = request
         self.response = response
@@ -275,6 +281,20 @@ class StepResult:
         self.function_call_raw = function_call_raw
         self.html_shell = html_shell
         self.content_type = content_type
+        # Transport diagnostics are deliberately in-memory only.  They must
+        # never cross the runner/cloud boundary in a turn or transcript.
+        self.diagnostics = {
+            "timeout_connect_s": CONNECT_TIMEOUT,
+            "timeout_read_s": DEFAULT_REQUEST_TIMEOUT,
+            "timeout_write_s": WRITE_TIMEOUT,
+            "timeout_pool_s": POOL_TIMEOUT,
+            **(diagnostics or {}),
+        }
+        self.timeout_phase = self.diagnostics.get("timeout_phase")
+        self.timeout_connect_s = self.diagnostics["timeout_connect_s"]
+        self.timeout_read_s = self.diagnostics["timeout_read_s"]
+        self.timeout_write_s = self.diagnostics["timeout_write_s"]
+        self.timeout_pool_s = self.diagnostics["timeout_pool_s"]
 
     def to_dict(self) -> Dict:
         d: Dict[str, Any] = {
@@ -373,6 +393,76 @@ class LocalTestExecutor:
         path = (path_override or self.message_path).lstrip("/")
         return self.base_url + "/" + path
 
+    def _timeout(self) -> httpx.Timeout:
+        """Build the explicit local-target timeout profile.
+
+        Local inference needs a materially longer read budget than connect
+        setup.  The short connect/pool budgets fail fast for dead targets,
+        while writes remain bounded independently of model generation.
+        """
+        return httpx.Timeout(
+            connect=CONNECT_TIMEOUT,
+            read=float(self.request_timeout),
+            write=WRITE_TIMEOUT,
+            pool=POOL_TIMEOUT,
+        )
+
+    def _diagnostic_context(self) -> Dict[str, Any]:
+        return {
+            "request_id": str(uuid.uuid4()),
+            "request_started": time.monotonic(),
+            "headers_received": None,
+            "body_complete": None,
+            "exception": None,
+            "timeout_connect_s": CONNECT_TIMEOUT,
+            "timeout_read_s": float(self.request_timeout),
+            "timeout_write_s": WRITE_TIMEOUT,
+            "timeout_pool_s": POOL_TIMEOUT,
+        }
+
+    @staticmethod
+    def _timeout_phase(exc: BaseException) -> str:
+        for timeout_type, phase in (
+            (httpx.ConnectTimeout, "connect"),
+            (httpx.ReadTimeout, "read"),
+            (httpx.WriteTimeout, "write"),
+            (httpx.PoolTimeout, "pool"),
+        ):
+            if isinstance(exc, timeout_type):
+                return phase
+        return "unknown"
+
+    @staticmethod
+    def _log_transport_diagnostic(context: Dict[str, Any], exc: Optional[BaseException] = None) -> None:
+        """Log only opaque transport facts; never URL, body, or run identity."""
+        phase = LocalTestExecutor._timeout_phase(exc) if exc else None
+        log(
+            logger,
+            "warning" if exc else "debug",
+            "Local target request transport diagnostic",
+            request_id=context["request_id"],
+            timeout_phase=phase,
+            timeout_connect_s=CONNECT_TIMEOUT,
+            timeout_read_s=context.get("timeout_read_s"),
+            timeout_write_s=WRITE_TIMEOUT,
+            timeout_pool_s=POOL_TIMEOUT,
+            request_started=context["request_started"],
+            headers_received=context.get("headers_received"),
+            body_complete=context.get("body_complete"),
+            exception_at=context.get("exception"),
+        )
+
+    def _client_kwargs(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        def response_hook(_response: httpx.Response) -> None:
+            context["headers_received"] = time.monotonic()
+
+        return {
+            "timeout": self._timeout(),
+            "follow_redirects": False,
+            "trust_env": False,
+            "event_hooks": {"response": [response_hook]},
+        }
+
     def _reset_session(self) -> None:
         """Clear carried target state before a fresh model-turn invocation."""
         self._session_value = None
@@ -388,33 +478,37 @@ class LocalTestExecutor:
     def execute_surface_probe(self, paths: List[str]) -> List[Dict[str, Any]]:
         """GET passive routes without auth and return observations, never verdicts."""
         observations: List[Dict[str, Any]] = []
-        with httpx.Client(
-            timeout=self.request_timeout,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            for path in paths:
-                started = time.monotonic()
-                try:
-                    response = client.get(self._url(path))
-                    observations.append({
-                        "path": path,
-                        "status_code": response.status_code,
-                        "response_excerpt": (response.text or "")[:1000],
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "error": None,
-                    })
-                except Exception as exc:
-                    url = self._url(path)
-                    observations.append({
-                        "path": path,
-                        "status_code": 0,
-                        "response_excerpt": "",
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "error": f"{exc}{bypassed_system_proxy_note(url)}"[:300],
-                    })
-                if self.inter_step_delay:
-                    time.sleep(self.inter_step_delay)
+        for path in paths:
+            started = time.monotonic()
+            context = self._diagnostic_context()
+            try:
+                with httpx.Client(**self._client_kwargs(context)) as client:
+                    response = client.get(
+                        self._url(path),
+                        headers={REQUEST_ID_HEADER: context["request_id"]},
+                    )
+                context["body_complete"] = time.monotonic()
+                self._log_transport_diagnostic(context)
+                observations.append({
+                    "path": path,
+                    "status_code": response.status_code,
+                    "response_excerpt": (response.text or "")[:1000],
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "error": None,
+                })
+            except Exception as exc:
+                context["exception"] = time.monotonic()
+                self._log_transport_diagnostic(context, exc)
+                url = self._url(path)
+                observations.append({
+                    "path": path,
+                    "status_code": 0,
+                    "response_excerpt": "",
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "error": f"{exc}{bypassed_system_proxy_note(url)}"[:300],
+                })
+            if self.inter_step_delay:
+                time.sleep(self.inter_step_delay)
         return observations
 
     def execute_enforcement_probe(
@@ -512,15 +606,15 @@ class LocalTestExecutor:
                         "url": self._url(probe["path"]),
                         "headers": request_headers,
                     }
+                    context = self._diagnostic_context()
+                    request_kwargs["headers"][REQUEST_ID_HEADER] = context["request_id"]
                     if method in {"GET", "HEAD"}:
                         request_kwargs["params"] = body
                     else:
                         request_kwargs["json"] = body
                         request_kwargs["headers"]["Content-Type"] = "application/json"
                     with httpx.Client(
-                        timeout=self.request_timeout,
-                        follow_redirects=False,
-                        trust_env=False,
+                        **self._client_kwargs(context),
                     ) as client:
                         with client.stream(**request_kwargs) as response:
                             body_bytes = bytearray()
@@ -536,6 +630,7 @@ class LocalTestExecutor:
                             )
                             response_status = response.status_code
                             response_headers = dict(response.headers)
+                            context["body_complete"] = time.monotonic()
                     observations.append(
                         {
                             "variant": variant["name"],
@@ -547,7 +642,9 @@ class LocalTestExecutor:
                             "error": None,
                         }
                     )
-                except httpx.TimeoutException:
+                except httpx.TimeoutException as exc:
+                    context["exception"] = time.monotonic()
+                    self._log_transport_diagnostic(context, exc)
                     observations.append(
                         {
                             "variant": variant["name"],
@@ -720,7 +817,9 @@ class LocalTestExecutor:
         url = self._url(path_override)
         method = (method_override or self.method).split(",")[0].strip().upper()
         auth_hdrs = self._auth_headers()
-        start = time.time()
+        context = self._diagnostic_context()
+        request_headers = dict(auth_hdrs)
+        request_headers[REQUEST_ID_HEADER] = context["request_id"]
 
         try:
             if method in ("GET", "HEAD"):
@@ -728,16 +827,12 @@ class LocalTestExecutor:
                 params = {self.request_message_field: msg_truncated}
                 if self.session_id_field and self._session_value is not None:
                     params[self.session_id_field] = self._session_value
-                with httpx.Client(
-                    timeout=self.request_timeout,
-                    follow_redirects=False,
-                    trust_env=False,
-                ) as c:
+                with httpx.Client(**self._client_kwargs(context)) as c:
                     resp = c.request(
                         method=method,
                         url=url,
                         params=params,
-                        headers=auth_hdrs,
+                        headers=request_headers,
                     )
             else:
                 extra_body = {
@@ -759,19 +854,19 @@ class LocalTestExecutor:
                 body.update(extra_body)
                 if self.session_id_field and self._session_value is not None:
                     body[self.session_id_field] = self._session_value
-                with httpx.Client(
-                    timeout=self.request_timeout,
-                    follow_redirects=False,
-                    trust_env=False,
-                ) as c:
+                with httpx.Client(**self._client_kwargs(context)) as c:
                     resp = c.request(
                         method=method,
                         url=url,
                         json=body,
-                        headers={**auth_hdrs, "Content-Type": "application/json"},
+                        headers={**request_headers, "Content-Type": "application/json"},
                     )
-        except httpx.TimeoutException:
-            elapsed_ms = int((time.time() - start) * 1000)
+            context["body_complete"] = time.monotonic()
+            self._log_transport_diagnostic(context)
+        except httpx.TimeoutException as exc:
+            context["exception"] = time.monotonic()
+            self._log_transport_diagnostic(context, exc)
+            elapsed_ms = int((time.monotonic() - context["request_started"]) * 1000)
             return StepResult(
                 request=message,
                 response="[TIMEOUT]",
@@ -779,9 +874,19 @@ class LocalTestExecutor:
                 status_code=0,
                 elapsed_ms=elapsed_ms,
                 extraction_error="Target unreachable or timed out",
+                diagnostics={
+                    **context,
+                    "timeout_phase": self._timeout_phase(exc),
+                    "timeout_connect_s": CONNECT_TIMEOUT,
+                    "timeout_read_s": float(self.request_timeout),
+                    "timeout_write_s": WRITE_TIMEOUT,
+                    "timeout_pool_s": POOL_TIMEOUT,
+                },
             )
         except Exception as exc:
-            elapsed_ms = int((time.time() - start) * 1000)
+            context["exception"] = time.monotonic()
+            self._log_transport_diagnostic(context, exc)
+            elapsed_ms = int((time.monotonic() - context["request_started"]) * 1000)
             proxy_note = bypassed_system_proxy_note(url)
             return StepResult(
                 request=message,
@@ -790,9 +895,10 @@ class LocalTestExecutor:
                 status_code=0,
                 elapsed_ms=elapsed_ms,
                 extraction_error=f"Connection error: {exc}{proxy_note}",
+                diagnostics=context,
             )
 
-        elapsed_ms = int((time.time() - start) * 1000)
+        elapsed_ms = int((time.monotonic() - context["request_started"]) * 1000)
         status_code = resp.status_code
         content_type = resp.headers.get("content-type", "")
 
@@ -806,6 +912,7 @@ class LocalTestExecutor:
                 status_code=status_code,
                 elapsed_ms=elapsed_ms,
                 extraction_error=f"Redirect received ({status_code}) Location: {location}",
+                diagnostics=context,
             )
 
         # 4xx / 5xx
@@ -823,6 +930,7 @@ class LocalTestExecutor:
                 status_code=status_code,
                 elapsed_ms=elapsed_ms,
                 extraction_error=f"HTTP error {status_code}{allow_note}. Body: {snippet}",
+                diagnostics=context,
             )
 
         # HTML shell detection
@@ -839,6 +947,7 @@ class LocalTestExecutor:
                 ),
                 html_shell=True,
                 content_type=content_type,
+                diagnostics=context,
             )
 
         # Parse JSON + extract reply
@@ -875,6 +984,7 @@ class LocalTestExecutor:
                 tool_calls_raw=tool_calls_raw,
                 function_call_raw=function_call_raw,
                 content_type=content_type,
+                diagnostics=context,
             )
 
         return StepResult(
@@ -886,6 +996,7 @@ class LocalTestExecutor:
             tool_calls_raw=tool_calls_raw,
             function_call_raw=function_call_raw,
             content_type=content_type,
+            diagnostics=context,
         )
 
     # ------------------------------------------------------------------

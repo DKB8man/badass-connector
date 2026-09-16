@@ -8,13 +8,16 @@
 | Operating system | Linux, macOS, Windows (WSL recommended on Windows) |
 | Network | Outbound HTTPS to `https://badass-sec.com` |
 
-The connector depends only on:
+The currently published connector 0.5.2 depends only on:
 - [`click`](https://click.palletsprojects.com/) ≥ 8.0 — CLI framework
 - [`httpx`](https://www.python-httpx.org/) ≥ 0.28.0 — HTTP client
 - [`pydantic`](https://docs.pydantic.dev/) = 2.12.5 — strict wire-contract validation
 - `badass-runner-protocol` = 0.2.2 — public runner/cloud protocol contracts
 
 All dependencies are installed automatically.
+
+The source tree is preparing runner 0.5.3 with protocol 0.2.3. Do not request
+those versions from PyPI until the guarded release workflow has published them.
 
 ---
 
@@ -55,7 +58,7 @@ pip install -e ".[dev]"
 
 ```bash
 badass-runner --version
-# badass-runner, version 0.5.2
+# badass-runner, version 0.5.2  # current published release
 ```
 
 ```bash
@@ -67,8 +70,18 @@ badass-runner --help
 ## Upgrading
 
 ```bash
-pip install --upgrade badass-runner
+pipx upgrade badass-runner
 ```
+
+BADASS Cloud supports only the latest published runner. When a new runner is
+published, older running connectors stop receiving jobs until their operators
+upgrade them. Any queued run assigned to an outdated connector fails without
+dispatch, and the connector receives an upgrade-required response naming the
+required version and this command.
+
+This is intentionally a hard compatibility boundary. There is no
+warning-and-proceed mode and no result marked merely “possibly incompatible”:
+an outdated runner cannot produce assurance results.
 
 The connector checks its version against the cloud's declared minimum before
 `start`. If the installed version is below the minimum, startup refuses to

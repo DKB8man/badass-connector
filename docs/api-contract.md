@@ -5,7 +5,7 @@ This document describes the HTTP endpoints that the BADASS Connector
 reference for anyone maintaining the connector, writing a compatible server, or
 reasoning about what data crosses the trust boundary.
 
-**Current connector version:** `0.5.2`
+**Current in-tree connector version:** `0.5.3` (unpublished)
 **Base URL:** configured at runtime via `--server-url` / `BADASS_SERVER_URL`.
 No URL is hardcoded in the connector.
 
@@ -84,7 +84,7 @@ The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 ```json
 {
   "registration_token": "badass_reg_<opaque>",
-  "runner_version": "0.5.2",
+  "runner_version": "0.5.3",
   "capabilities": [
     "enforcement_execution_plan_v2",
     "enforcement_execution_plan_context_refs_v1",
@@ -152,7 +152,7 @@ thread at a configurable interval (default: every 30 s).
 
 ```json
 {
-  "runner_version": "0.5.2",
+  "runner_version": "0.5.3",
   "capabilities": [
     "enforcement_execution_plan_v2",
     "enforcement_execution_plan_context_refs_v1",
@@ -229,7 +229,8 @@ No body.
       "limits": {
         "inter_request_delay_s": 0.5,
         "max_turns_per_test": 5,
-        "overall_run_timeout_s": 600
+        "overall_run_timeout_s": 600,
+        "request_timeout_s": 30
       }
     }
   ]
@@ -290,6 +291,7 @@ Schema 2 remains unchanged and uses the existing value-bearing
 | `inter_request_delay_s` | float | 0.5 | Seconds to wait between consecutive steps within a test. |
 | `max_turns_per_test` | int | 5 | Hard cap on the number of prompt-response turns per test. |
 | `overall_run_timeout_s` | float | 600 | Total wall-clock budget for the entire run. |
+| `request_timeout_s` | float | 30 | Optional per-target read budget for runner 0.5.3 and newer (range: >0–120s). The server currently omits it for published-runner compatibility. Older jobs and runner 0.5.2 use the established runner default. |
 
 #### Status codes
 
@@ -627,7 +629,7 @@ within the `runner/` directory.
 Every API call that includes a body sends:
 
 ```json
-{ "runner_version": "0.5.2" }
+{ "runner_version": "0.5.3" }
 ```
 
 Before `start`, the connector calls the unauthenticated compatibility endpoint:
@@ -635,15 +637,19 @@ Before `start`, the connector calls the unauthenticated compatibility endpoint:
 ```
 GET /api/runners/version
 → {
-  "minimum_runner_version": "0.2.0",
+  "minimum_runner_version": "0.5.2",
   "recommended_runner_version": "0.5.2",
   "api_contract_version": 1
 }
 ```
 
-Versions below the minimum stop with an actionable upgrade message. Versions
-below the recommendation warn but continue. If the endpoint is unavailable,
-the connector warns and continues for compatibility with older cloud releases.
+The two advertised versions are deliberately identical. BADASS Cloud supports
+only the latest published runner. A runner below this version exits when it can
+read the endpoint; the server independently returns HTTP 426 from job polling,
+fails queued work, and dispatches no target request. There is no
+warning-and-proceed tier. If the endpoint is unavailable, startup warns and
+continues for compatibility with older cloud releases, but current cloud still
+enforces the floor at polling.
 
 ---
 

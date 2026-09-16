@@ -7,6 +7,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- A malformed job envelope now fails only that job and leaves the poller
+  running. When the invalid envelope contains an explicit non-empty string
+  `run_id`, the runner reports the validation failure to the cloud; otherwise
+  it logs the rejection without inventing an identifier.
+- Runner lifecycle callbacks and post-claim setup failures are contained so
+  they cannot terminate the poller or dispatch an unintended target request.
+
+### Changed
+
+- Cloud compatibility is now explicitly latest-only. Older runners are rejected
+  before job dispatch with the required version and
+  `pipx upgrade badass-runner`; warning-and-proceed results are not supported.
+- CI and the guarded release dry-run validate every server runner-job variant
+  against the immutable protocol wheel required by the latest published runner,
+  independently of the in-tree protocol package.
+- Local target requests now use separate 3-second connect, 30-second read,
+  10-second write, and 3-second pool budgets. The server-issued
+  `request_timeout_s` controls the read budget.
+- Runner-local transport diagnostics now distinguish timeout phases, record
+  monotonic request milestones, and send an opaque request correlation header
+  without uploading that metadata in turns or transcripts.
+
+### Release requirement
+
+- Publication requires `badass-runner-protocol` 0.2.3 first, followed by
+  `badass-runner` 0.5.3. This change is not available in published runner 0.5.2.
+
+---
+
 ## [0.5.2] — 2026-09-15
 
 ### Fixed

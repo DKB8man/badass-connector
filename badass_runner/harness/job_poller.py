@@ -27,6 +27,7 @@ Design constraints
 """
 import threading
 import time
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from ..client import CloudAPIError, RunnerClient
@@ -47,6 +48,7 @@ logger = get_logger()
 _POLL_INTERVAL = 10        # seconds between idle polls
 _POLL_INTERVAL_BUSY = 1    # seconds between polls when a job was just processed
 _PREFLIGHT_TEST_ID = "__preflight_probe__"
+_SAFE_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +110,45 @@ class JobPoller:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @staticmethod
+    def _safe_run_id(job: Any) -> Optional[str]:
+        """Return only an explicit, non-empty string run id; never derive one."""
+        if not isinstance(job, dict):
+            return None
+        # Call the built-in implementation so a hostile dict subclass cannot
+        # make identifier recovery execute arbitrary ``get``/``__getitem__``.
+        run_id = dict.get(job, "run_id")
+        if type(run_id) is not str or _SAFE_RUN_ID_RE.fullmatch(run_id) is None:
+            return None
+        return run_id
+
+    def _report_job_failure(self, run_id: str, reason: str) -> None:
+        """Best-effort failure reporting must never stop the poller."""
+        try:
+            self.client.fail_job(run_id, reason)
+        except Exception as exc:
+            log(
+                logger,
+                "error",
+                "Could not report job failure",
+                run_id=run_id,
+                error=str(exc),
+            )
+
+    def _notify_job_complete(self, run_id: str, success: bool) -> None:
+        """Lifecycle observers are diagnostic only and cannot stop polling."""
+        try:
+            self._on_job_complete(run_id, success)
+        except Exception as exc:
+            log(
+                logger,
+                "error",
+                "Job completion callback failed",
+                run_id=run_id,
+                success=success,
+                error=str(exc),
+            )
+
     # ------------------------------------------------------------------
     # Poll loop
     # ------------------------------------------------------------------
@@ -138,12 +179,51 @@ class JobPoller:
                 self._stop_event.wait(self.poll_interval)
                 continue
 
+            if not isinstance(jobs, list):
+                log(
+                    logger,
+                    "error",
+                    "Malformed jobs response; expected a list",
+                    received_type=type(jobs).__name__,
+                )
+                self._stop_event.wait(self.poll_interval)
+                continue
+
             # Process the first available job, then immediately re-poll
             job = jobs[0]
-            run_id = job.get("run_id", "")
-            if run_id:
+            if not isinstance(job, dict):
+                log(
+                    logger,
+                    "error",
+                    "Malformed job item; expected an object",
+                    received_type=type(job).__name__,
+                )
+                self._stop_event.wait(_POLL_INTERVAL_BUSY)
+                continue
+
+            run_id = self._safe_run_id(job)
+            if run_id is None:
+                log(
+                    logger,
+                    "error",
+                    "Malformed job has no safely reportable run_id; job skipped",
+                )
+            else:
                 log(logger, "info", "Pending job found", run_id=run_id)
-                self._execute_job(job)
+                try:
+                    self._execute_job(job)
+                except Exception as exc:
+                    log(
+                        logger,
+                        "error",
+                        "Unhandled job processing failure; poller continuing",
+                        run_id=run_id,
+                        error=str(exc),
+                    )
+                    self._report_job_failure(
+                        run_id, f"Unhandled runner job processing failure: {exc}"
+                    )
+                    self._notify_job_complete(run_id, False)
 
             self._stop_event.wait(_POLL_INTERVAL_BUSY)
 
@@ -200,7 +280,30 @@ class JobPoller:
     def _execute_job(self, job: Dict[str, Any]) -> None:
         # Validate the shared public contract while preserving the received
         # dictionary exactly (ordinary prompt tests intentionally omit mode).
-        validate_job_envelope(job)
+        run_id = self._safe_run_id(job)
+        try:
+            validate_job_envelope(job)
+        except Exception as exc:
+            log(
+                logger,
+                "error",
+                "Job envelope validation failed; job will not execute",
+                run_id=run_id,
+                error=str(exc),
+            )
+            if run_id is not None:
+                self._report_job_failure(
+                    run_id, f"Job envelope validation failed: {exc}"
+                )
+            else:
+                log(
+                    logger,
+                    "error",
+                    "Validation failure cannot be reported without a safe run_id",
+                )
+            return
+
+        # Strict validation guarantees a non-empty string run_id here.
         run_id = job["run_id"]
         target_cfg: Dict = job.get("target", {})
         tests: List[Dict] = job.get("tests", [])
@@ -221,44 +324,87 @@ class JobPoller:
             return
 
         log(logger, "info", "Job claimed", run_id=run_id, test_count=len(tests))
-        self._on_job_start(run_id)
+        try:
+            self._on_job_start(run_id)
+        except Exception as exc:
+            log(
+                logger,
+                "error",
+                "Job start callback failed; execution continuing",
+                run_id=run_id,
+                error=str(exc),
+            )
 
-        # ── Build executor ─────────────────────────────────────────────────
-        _auth_type: str = target_cfg.get("auth_type") or ""
-        _dynamic_auth_types = {"oauth_client_credentials", "login_cookie"}
-        _uses_dynamic_auth: bool = _auth_type in _dynamic_auth_types
+        try:
+            # ── Build executor ─────────────────────────────────────────────
+            if type(target_cfg) is not dict:
+                raise TypeError("target must be an ordinary object")
+            if type(tests) is not list:
+                raise TypeError("tests must be an ordinary list")
+            if type(limits) is not dict:
+                raise TypeError("limits must be an ordinary object")
+            if any(type(test) is not dict for test in tests):
+                raise TypeError("each test must be an ordinary object")
 
-        _extra_body = target_cfg.get("extra_body_fields") or {}
-        # R5-B only makes the multi-context store available to the poller.
-        # It must not resolve a cloud credential reference or inject it until R5-C.
-        executor_auth_store = self.auth_store if isinstance(self.auth_store, LocalAuthStore) else None
-        executor = LocalTestExecutor(
-            base_url=target_cfg.get("base_url", ""),
-            message_path=target_cfg.get("message_path", "/"),
-            method=target_cfg.get("method", "POST"),
-            request_message_field=target_cfg.get("request_message_field", "message"),
-            response_message_field=target_cfg.get("response_message_field", "reply"),
-            auth_store=executor_auth_store,
-            inter_step_delay=float(limits.get("inter_request_delay_s", 0.5)),
-            extra_body_fields=_extra_body if isinstance(_extra_body, dict) else {},
-            body_format=target_cfg.get("body_format", "flat"),
-            can_cause_side_effects=bool(target_cfg.get("can_cause_side_effects", False)),
-        )
+            _auth_type: str = target_cfg.get("auth_type") or ""
+            _dynamic_auth_types = {"oauth_client_credentials", "login_cookie"}
+            _uses_dynamic_auth: bool = _auth_type in _dynamic_auth_types
 
-        # Collect credential values for sanitization — never uploaded
-        auth_secrets: List[str] = []
-        if executor_auth_store and executor_auth_store.credential_value:
-            auth_secrets.append(executor_auth_store.credential_value)
+            _extra_body = target_cfg.get("extra_body_fields") or {}
+            # R5-B only makes the multi-context store available to the poller.
+            # It must not resolve a cloud credential reference or inject it until R5-C.
+            executor_auth_store = (
+                self.auth_store
+                if isinstance(self.auth_store, LocalAuthStore)
+                else None
+            )
+            executor = LocalTestExecutor(
+                base_url=target_cfg.get("base_url", ""),
+                message_path=target_cfg.get("message_path", "/"),
+                method=target_cfg.get("method", "POST"),
+                request_message_field=target_cfg.get(
+                    "request_message_field", "message"
+                ),
+                response_message_field=target_cfg.get(
+                    "response_message_field", "reply"
+                ),
+                auth_store=executor_auth_store,
+                request_timeout=float(limits.get("request_timeout_s", 30.0)),
+                inter_step_delay=float(limits.get("inter_request_delay_s", 0.5)),
+                extra_body_fields=(
+                    _extra_body if isinstance(_extra_body, dict) else {}
+                ),
+                body_format=target_cfg.get("body_format", "flat"),
+                can_cause_side_effects=bool(
+                    target_cfg.get("can_cause_side_effects", False)
+                ),
+            )
 
-        max_turns = int(limits.get("max_turns_per_test", 5))
-        run_timeout = float(limits.get("overall_run_timeout_s", 600))
-        run_start = time.time()
+            # Collect credential values for sanitization — never uploaded
+            auth_secrets: List[str] = []
+            if executor_auth_store and executor_auth_store.credential_value:
+                auth_secrets.append(executor_auth_store.credential_value)
 
-        results: List[Dict] = []
-        has_preflight = bool(
-            tests and tests[0].get("test_id") == _PREFLIGHT_TEST_ID
-        )
-        preflight_failed = False
+            max_turns = int(limits.get("max_turns_per_test", 5))
+            run_timeout = float(limits.get("overall_run_timeout_s", 600))
+            run_start = time.time()
+
+            results: List[Dict] = []
+            has_preflight = bool(
+                tests and tests[0].get("test_id") == _PREFLIGHT_TEST_ID
+            )
+            preflight_failed = False
+        except Exception as exc:
+            log(
+                logger,
+                "error",
+                "Job setup failed; no target request was dispatched",
+                run_id=run_id,
+                error=str(exc),
+            )
+            self._report_job_failure(run_id, f"Job setup failed: {exc}")
+            self._notify_job_complete(run_id, False)
+            return
 
         for test_index, test in enumerate(tests):
             if self._stop_event.is_set():
@@ -457,13 +603,12 @@ class JobPoller:
             self.client.complete_job(run_id, results, auth_status=_upload_auth_status)
             log(logger, "info", "Results uploaded",
                 run_id=run_id, result_count=len(results))
-            self._on_job_complete(run_id, True)
         except Exception as exc:
             log(logger, "error", "Upload failed", run_id=run_id, error=str(exc))
-            try:
-                # auth_status omitted — the cloud infers "failed" from a
-                # stuck "logging_in" marker written at claim time.
-                self.client.fail_job(run_id, f"Upload failed: {exc}")
-            except Exception:
-                pass
-            self._on_job_complete(run_id, False)
+            # auth_status omitted — the cloud infers "failed" from a
+            # stuck "logging_in" marker written at claim time.
+            self._report_job_failure(run_id, f"Upload failed: {exc}")
+            self._notify_job_complete(run_id, False)
+            return
+
+        self._notify_job_complete(run_id, True)
