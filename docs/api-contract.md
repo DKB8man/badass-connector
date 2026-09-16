@@ -5,7 +5,7 @@ This document describes the HTTP endpoints that the BADASS Connector
 reference for anyone maintaining the connector, writing a compatible server, or
 reasoning about what data crosses the trust boundary.
 
-**Current connector version:** `0.5.1`
+**Current connector version:** `0.5.2`
 **Base URL:** configured at runtime via `--server-url` / `BADASS_SERVER_URL`.
 No URL is hardcoded in the connector.
 
@@ -84,11 +84,12 @@ The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 ```json
 {
   "registration_token": "badass_reg_<opaque>",
-  "runner_version": "0.5.1",
+  "runner_version": "0.5.2",
   "capabilities": [
     "enforcement_execution_plan_v2",
     "enforcement_execution_plan_context_refs_v1",
-    "surface_probe_v1"
+    "surface_probe_v1",
+    "baseline_preflight_v1"
   ]
 }
 ```
@@ -97,7 +98,7 @@ The `runner_token` is persisted locally in `~/.badass-runner/config.json` (mode
 |---|---|---|
 | `registration_token` | string | One-time token issued by BADASS Cloud (prefix `badass_reg_`). Consumed on first successful use. |
 | `runner_version` | string | Semver string from `badass_runner.__version__`. |
-| `capabilities` | string[] | Exact feature protocols implemented by this runner. `enforcement_execution_plan_context_refs_v1` advertises schema-3 runner-local credential references. |
+| `capabilities` | string[] | Exact feature protocols implemented by this runner. `enforcement_execution_plan_context_refs_v1` advertises schema-3 runner-local credential references; `baseline_preflight_v1` advertises ordered benign-control execution. |
 
 #### Response — 200 OK
 
@@ -151,11 +152,12 @@ thread at a configurable interval (default: every 30 s).
 
 ```json
 {
-  "runner_version": "0.5.1",
+  "runner_version": "0.5.2",
   "capabilities": [
     "enforcement_execution_plan_v2",
     "enforcement_execution_plan_context_refs_v1",
-    "surface_probe_v1"
+    "surface_probe_v1",
+    "baseline_preflight_v1"
   ]
 }
 ```
@@ -211,6 +213,13 @@ No body.
       },
       "tests": [
         {
+          "test_id": "__preflight_probe__",
+          "steps": ["hello"],
+          "endpoint_path": "/health",
+          "endpoint_method": "GET",
+          "new_session_before": []
+        },
+        {
           "test_id": "<opaque string>",
           "steps": ["Hello", "Ignore previous instructions and …"],
           "endpoint_path": "/api/chat",
@@ -248,7 +257,13 @@ may contain more than one job, but the connector currently processes only
 | `test_id` | string | Opaque identifier; echoed back in the `complete` payload. |
 | `steps` | string[] | Ordered prompt strings sent to the AI endpoint sequentially. |
 | `endpoint_path` | string \| null | Per-test path override; falls back to `target.message_path` when null. |
+| `endpoint_method` | string \| null | Per-test HTTP method override; falls back to `target.method` when null. |
 | `new_session_before` | int[] | 1-indexed step indices at which the connector should reset session state (e.g. clear cookies) before sending the step. |
+
+Normal jobs begin with the reserved `__preflight_probe__` benign control. The
+connector must execute it before any later test. If it fails, the connector
+uploads only that result with an error stating that remaining tests were
+skipped; no adversarial request is dispatched.
 
 **Mode-2 referenced enforcement plans (schema 3):**
 
@@ -612,7 +627,7 @@ within the `runner/` directory.
 Every API call that includes a body sends:
 
 ```json
-{ "runner_version": "0.5.1" }
+{ "runner_version": "0.5.2" }
 ```
 
 Before `start`, the connector calls the unauthenticated compatibility endpoint:
@@ -621,7 +636,7 @@ Before `start`, the connector calls the unauthenticated compatibility endpoint:
 GET /api/runners/version
 → {
   "minimum_runner_version": "0.2.0",
-  "recommended_runner_version": "0.5.1",
+  "recommended_runner_version": "0.5.2",
   "api_contract_version": 1
 }
 ```

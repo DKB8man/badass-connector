@@ -710,6 +710,7 @@ class LocalTestExecutor:
         self,
         message: str,
         path_override: Optional[str] = None,
+        method_override: Optional[str] = None,
     ) -> StepResult:
         """Send *message* to the target and return a :class:`StepResult`.
 
@@ -717,11 +718,12 @@ class LocalTestExecutor:
         errors so the cloud evaluator can classify them correctly.
         """
         url = self._url(path_override)
+        method = (method_override or self.method).split(",")[0].strip().upper()
         auth_hdrs = self._auth_headers()
         start = time.time()
 
         try:
-            if self.method in ("GET", "HEAD", "DELETE"):
+            if method in ("GET", "HEAD"):
                 msg_truncated = message[:MAX_GET_MESSAGE_LEN]
                 params = {self.request_message_field: msg_truncated}
                 if self.session_id_field and self._session_value is not None:
@@ -732,13 +734,13 @@ class LocalTestExecutor:
                     trust_env=False,
                 ) as c:
                     resp = c.request(
-                        method=self.method,
+                        method=method,
                         url=url,
                         params=params,
                         headers=auth_hdrs,
                     )
             else:
-                body = {
+                extra_body = {
                     key: value
                     for key, value in self.extra_body_fields.items()
                     if not (
@@ -746,7 +748,15 @@ class LocalTestExecutor:
                         and key == self.session_id_field
                     )
                 }
-                body[self.request_message_field] = message
+                if self.body_format == "openai_messages":
+                    body = {
+                        "messages": [{"role": "user", "content": message}]
+                    }
+                else:
+                    body = {self.request_message_field: message}
+                # Match cloud send_message precedence: explicitly configured
+                # fields replace generated defaults on key collisions.
+                body.update(extra_body)
                 if self.session_id_field and self._session_value is not None:
                     body[self.session_id_field] = self._session_value
                 with httpx.Client(
@@ -755,7 +765,7 @@ class LocalTestExecutor:
                     trust_env=False,
                 ) as c:
                     resp = c.request(
-                        method=self.method,
+                        method=method,
                         url=url,
                         json=body,
                         headers={**auth_hdrs, "Content-Type": "application/json"},
@@ -889,6 +899,7 @@ class LocalTestExecutor:
         max_turns: int = 5,
         new_session_before: Optional[List[int]] = None,
         path_override: Optional[str] = None,
+        method_override: Optional[str] = None,
         reset_session_before_first_request: bool = False,
     ) -> List[Dict]:
         """Execute all *steps* for one test and return a list of turn dicts.
@@ -909,6 +920,8 @@ class LocalTestExecutor:
             caller may claim runner-side independence only when this ran.
         path_override:
             If supplied, use this path instead of ``self.message_path``.
+        method_override:
+            If supplied, use this method instead of ``self.method``.
 
         Returns
         -------
@@ -927,7 +940,11 @@ class LocalTestExecutor:
         for i, step in enumerate(capped):
             log(logger, "debug", "Executing step",
                 test_id=test_id, step=i, total=len(capped))
-            turn = self.send_step(step, path_override=path_override)
+            turn = self.send_step(
+                step,
+                path_override=path_override,
+                method_override=method_override,
+            )
             turns.append(turn.to_dict())
 
             # A reset index starts a new client-side identity before its request.

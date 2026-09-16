@@ -12,7 +12,7 @@ The connector depends only on:
 - [`click`](https://click.palletsprojects.com/) ≥ 8.0 — CLI framework
 - [`httpx`](https://www.python-httpx.org/) ≥ 0.28.0 — HTTP client
 - [`pydantic`](https://docs.pydantic.dev/) = 2.12.5 — strict wire-contract validation
-- `badass-runner-protocol` = 0.2.1 — public runner/cloud protocol contracts
+- `badass-runner-protocol` = 0.2.2 — public runner/cloud protocol contracts
 
 All dependencies are installed automatically.
 
@@ -55,7 +55,7 @@ pip install -e ".[dev]"
 
 ```bash
 badass-runner --version
-# badass-runner, version 0.5.1
+# badass-runner, version 0.5.2
 ```
 
 ```bash

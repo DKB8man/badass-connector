@@ -46,6 +46,7 @@ logger = get_logger()
 
 _POLL_INTERVAL = 10        # seconds between idle polls
 _POLL_INTERVAL_BUSY = 1    # seconds between polls when a job was just processed
+_PREFLIGHT_TEST_ID = "__preflight_probe__"
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +151,52 @@ class JobPoller:
     # Job execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _preflight_turn_succeeded(
+        turns: List[Dict[str, Any]],
+        test: Dict[str, Any],
+        target_cfg: Dict[str, Any],
+    ) -> bool:
+        """Return whether a generic model-turn established the baseline.
+
+        A baseline route can be a liveness-only endpoint, in which case a
+        response body is not required.  For a probe on the configured message
+        endpoint, however, the normal response extraction contract still
+        applies.  Keep this decision local to the runner: the result remains
+        the ordinary ``JobResultEnvelope`` and the cloud retains ownership of
+        richer preflight evaluation.
+        """
+        if not turns:
+            return False
+
+        turn = turns[0]
+        status_code = turn.get("status_code")
+        if not isinstance(status_code, int) or not 200 <= status_code < 300:
+            return False
+        if turn.get("html_shell"):
+            return False
+        if turn.get("extraction_error"):
+            probe_path = test.get("endpoint_path")
+            message_path = target_cfg.get("message_path")
+            canonical_probe = "/" + str(probe_path or "").strip().lstrip("/")
+            canonical_message = "/" + str(message_path or "").strip().lstrip("/")
+            if canonical_probe.rstrip("/") == canonical_message.rstrip("/"):
+                return False
+        return True
+
+    @staticmethod
+    def _preflight_failure_detail(turns: List[Dict[str, Any]]) -> str:
+        """Produce a small, already-sanitized reason for a failed baseline."""
+        if not turns:
+            return "no response turn was produced"
+        turn = turns[0]
+        if turn.get("extraction_error"):
+            return str(turn["extraction_error"])
+        status_code = turn.get("status_code")
+        if status_code:
+            return f"target returned HTTP {status_code}"
+        return "target was unreachable or timed out"
+
     def _execute_job(self, job: Dict[str, Any]) -> None:
         # Validate the shared public contract while preserving the received
         # dictionary exactly (ordinary prompt tests intentionally omit mode).
@@ -208,9 +255,18 @@ class JobPoller:
         run_start = time.time()
 
         results: List[Dict] = []
+        has_preflight = bool(
+            tests and tests[0].get("test_id") == _PREFLIGHT_TEST_ID
+        )
+        preflight_failed = False
 
-        for test in tests:
+        for test_index, test in enumerate(tests):
             if self._stop_event.is_set():
+                break
+
+            # A failed baseline is a safety boundary.  Do not even construct
+            # or dispatch an adversarial request after it has failed.
+            if has_preflight and test_index > 0 and preflight_failed:
                 break
 
             if time.time() - run_start > run_timeout:
@@ -218,8 +274,10 @@ class JobPoller:
                 break
 
             test_id = test.get("test_id", "")
+            is_preflight = has_preflight and test_index == 0
             steps: List[str] = test.get("steps", [])
             endpoint_path: Optional[str] = test.get("endpoint_path")
+            endpoint_method: Optional[str] = test.get("endpoint_method")
             new_session_before: List[int] = test.get("new_session_before") or []
             session_id_field: Optional[str] = test.get("session_id_field")
             execution_type = test.get("execution_type", "model_turns")
@@ -228,7 +286,10 @@ class JobPoller:
                 run_id=run_id, test_id=test_id, steps=len(steps))
 
             try:
-                if execution_type == "enforcement_probe":
+                # The reserved probe is deliberately a normal model-turn even
+                # if a malformed/legacy sender included another execution
+                # type.  Strict envelope validation still happens above.
+                if execution_type == "enforcement_probe" and not is_preflight:
                     enforcement_probe = test.get("enforcement_probe")
                     if (
                         isinstance(enforcement_probe, dict)
@@ -254,6 +315,7 @@ class JobPoller:
                         "enforcement_observations": safe_observations,
                         "error": None,
                         "endpoint_path": endpoint_path,
+                        "endpoint_method": endpoint_method,
                     })
                     log(
                         logger,
@@ -263,7 +325,7 @@ class JobPoller:
                         test_id=test_id,
                         observation_count=len(safe_observations),
                     )
-                elif execution_type == "surface_probe":
+                elif execution_type == "surface_probe" and not is_preflight:
                     raw_observations = executor.execute_surface_probe(
                         test.get("surface_probe_paths") or []
                     )
@@ -297,6 +359,7 @@ class JobPoller:
                         "surface_observations": safe_observations,
                         "error": None,
                         "endpoint_path": endpoint_path,
+                        "endpoint_method": endpoint_method,
                     })
                 else:
                     executor.set_session_id_field(session_id_field)
@@ -306,6 +369,7 @@ class JobPoller:
                         max_turns=max_turns,
                         new_session_before=new_session_before,
                         path_override=endpoint_path,
+                        method_override=endpoint_method,
                         reset_session_before_first_request=True,
                     )
                     safe_turns = sanitize_turns(raw_turns, auth_secrets)
@@ -322,29 +386,48 @@ class JobPoller:
                         "session_identity_assertion": session_assertion,
                         "error": None,
                         "endpoint_path": endpoint_path,
+                        "endpoint_method": endpoint_method,
                     })
                     log(logger, "info", "Test complete",
                         run_id=run_id, test_id=test_id, turns=len(safe_turns))
+                    if is_preflight and not self._preflight_turn_succeeded(
+                        safe_turns, test, target_cfg
+                    ):
+                        results[-1]["error"] = (
+                            "Baseline failed during preflight; remaining tests "
+                            "were skipped: "
+                            f"{self._preflight_failure_detail(safe_turns)}"
+                        )
+                        preflight_failed = True
+                        log(
+                            logger,
+                            "warning",
+                            "Baseline preflight failed; remaining tests skipped",
+                            run_id=run_id,
+                            test_id=test_id,
+                        )
 
             except Exception as exc:
                 err_msg = str(exc)
                 log(logger, "error", "Test execution error",
                     run_id=run_id, test_id=test_id, error=err_msg)
-                if execution_type == "enforcement_probe":
+                if execution_type == "enforcement_probe" and not is_preflight:
                     results.append({
                         "test_id": test_id,
                         "turns": [],
                         "enforcement_observations": [],
                         "error": err_msg,
                         "endpoint_path": endpoint_path,
+                        "endpoint_method": endpoint_method,
                     })
-                elif execution_type == "surface_probe":
+                elif execution_type == "surface_probe" and not is_preflight:
                     results.append({
                         "test_id": test_id,
                         "turns": [],
                         "surface_observations": [],
                         "error": None,
                         "endpoint_path": endpoint_path,
+                        "endpoint_method": endpoint_method,
                     })
                 else:
                     results.append({
@@ -353,7 +436,17 @@ class JobPoller:
                         "session_identity_assertion": SESSION_IDENTITY_ASSERTION_NOT_ASSERTED,
                         "error": err_msg,
                         "endpoint_path": endpoint_path,
+                        "endpoint_method": endpoint_method,
                     })
+                if is_preflight:
+                    # A runner-side execution exception is distinct from a
+                    # baseline verdict, but must fail closed before dispatch.
+                    results[-1]["error"] = (
+                        "Preflight execution error; baseline verdict was "
+                        "unavailable and remaining tests were skipped: "
+                        f"{err_msg}"
+                    )
+                    preflight_failed = True
 
         # ── Upload results ─────────────────────────────────────────────────
         # Report auth_status="ok" for dynamic-auth targets that reached this

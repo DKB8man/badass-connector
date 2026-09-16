@@ -217,7 +217,7 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
         run([sys.executable, str(GUARD), "stage", str(runner_stage)], RUNNER)
         run([sys.executable, str(GUARD), "source", str(runner_stage)], RUNNER)
         runner_project = (runner_stage / "pyproject.toml").read_text(encoding="utf-8")
-        if "[tool.uv.sources]" in runner_project or 'badass-runner-protocol==0.2.1' not in runner_project:
+        if "[tool.uv.sources]" in runner_project or 'badass-runner-protocol==0.2.2' not in runner_project:
             raise GateError("runner stage retained workspace override or lost exact protocol pin")
         protocol_out, runner_out = work / "protocol-dist", work / "runner-dist"
         protocol_out.mkdir()
@@ -235,8 +235,8 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
         run([sys.executable, str(GUARD), "artifact", "--source", str(runner_stage),
              *(str(p) for p in runner_files)], RUNNER)
         records: dict[str, dict[str, Any]] = {}
-        for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.2.1"),
-                                               ("badass-runner", runner_out, "0.5.1")):
+        for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.2.2"),
+                                               ("badass-runner", runner_out, "0.5.2")):
             files = built_artifacts(folder, distribution)
             for source in files:
                 kind = "wheel" if source.suffix == ".whl" else "sdist"
@@ -321,10 +321,16 @@ for module in (badass_runner, badass_runner_protocol):
     if repository == origin or repository in origin.parents: raise AssertionError("module resolved from monorepo")
 for name in ("badass-runner", "badass-runner-protocol"):
     dist = distribution(name)
-    text = "\n".join((site / f).read_text(errors="ignore") for f in (dist.files or []) if (site / f).is_file())
+    # Pip creates direct_url.json from the local wheel install command. It is
+    # not wheel content and must contain that temporary wheel's file URL.
+    text = "\n".join(
+        (site / f).read_text(errors="ignore")
+        for f in (dist.files or [])
+        if (site / f).is_file() and pathlib.Path(f).name != "direct_url.json"
+    )
     if str(repository) in text or "badass-release-" in text: raise AssertionError("forbidden build path in metadata")
 requirements = [x.replace(" ", "") for x in (distribution("badass-runner").metadata.get_all("Requires-Dist") or [])]
-assert "badass-runner-protocol==0.2.1" in requirements
+assert "badass-runner-protocol==0.2.2" in requirements
 assert all(importlib.util.find_spec(x) is None for x in ("back"+"end", "front"+"end", "scan"+"ners", "app"))
 payload={"schema_version":2,"path":"/","method":"GET","request_body":{},"authorized_headers":None,"non_mutating":True,"requires_isolated_fixture":False,"isolated_fixture":False,"unauthorized_variants":[{"name":"none","headers":{},"request_body":None,"non_mutating":None,"requires_isolated_fixture":None}]}
 from badass_runner.harness.enforcement import deserialize_enforcement_probe
@@ -334,7 +340,7 @@ except ValueError: pass
 else: raise AssertionError("protocol accepted unknown field")
 entrypoint = pathlib.Path(sys.executable).with_name("badass-runner")
 version = subprocess.run([str(entrypoint),"--version"], check=True, text=True, capture_output=True)
-assert version.stdout.strip() == "badass-runner, version 0.5.1"
+assert version.stdout.strip() == "badass-runner, version 0.5.2"
 help_result = subprocess.run([str(entrypoint),"--help"], check=True, text=True, capture_output=True)
 assert "Commands:" in help_result.stdout and "start" in help_result.stdout
 """

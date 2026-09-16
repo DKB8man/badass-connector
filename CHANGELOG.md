@@ -7,6 +7,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.2] — 2026-09-15
+
+### Fixed
+
+- Normal jobs now execute the configured benign baseline probe before any
+  adversarial test and stop locally when that control fails.
+- Baseline evidence is explicit and ordered; attack responses can no longer
+  establish baseline success.
+- Per-test endpoint methods allow a GET baseline route and POST message route
+  to coexist in one runner job.
+
+---
+
 ## [0.5.1] — 2026-09-14
 
 ### Fixed
