@@ -168,11 +168,18 @@ def _transport_validate_headers(
 # ---------------------------------------------------------------------------
 
 def _is_html_shell(text: str, content_type: str) -> bool:
+    return _classify_html_shell(text, content_type)["kind"] == "html_shell"
+
+
+def _classify_html_shell(text: str, content_type: str) -> dict:
     ct = (content_type or "").lower()
     if "text/html" in ct:
-        return True
+        return {"kind": "html_shell", "matched_by": "content_type", "content_type": content_type or ""}
     t = (text or "")[:2000].lower()
-    return any(m in t for m in _HTML_MARKERS)
+    for marker in _HTML_MARKERS:
+        if marker in t:
+            return {"kind": "html_shell", "matched_by": marker, "content_type": content_type or ""}
+    return {"kind": "not_shell", "matched_by": "none", "content_type": content_type or ""}
 
 
 def _as_str(val: Any) -> str:
@@ -250,6 +257,35 @@ def _extract_reply(resp_json: Any, response_field: str):
     return "", f"Field '{response_field}' not found. Available keys: {keys}"
 
 
+def _extract_reply_with_meta(resp_json: Any, response_field: str):
+    """Internal extractor metadata while keeping _extract_reply's API stable."""
+    reply, error = _extract_reply(resp_json, response_field)
+    if not reply:
+        return reply, error, ""
+    if isinstance(resp_json, dict):
+        value = resp_json.get(response_field)
+        if value is not None and _as_str(value):
+            return reply, error, response_field
+        for key, value in resp_json.items():
+            if key.lower() == response_field.lower() and _as_str(value):
+                return reply, error, key
+        for field in ("reply", "message", "content", "text", "answer", "output", "result", "response"):
+            if field != response_field and field in resp_json and _as_str(resp_json[field]):
+                return reply, error, field
+        choices = resp_json.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message") or {}
+            if isinstance(message, dict) and _as_str(message.get("content")):
+                return reply, error, "choices.0.message.content"
+            if _as_str(choices[0].get("text")):
+                return reply, error, "choices.0.text"
+        content = resp_json.get("content")
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            if _as_str(content[0].get("text")):
+                return reply, error, "content.0.text"
+    return reply, error, ""
+
+
 # ---------------------------------------------------------------------------
 # StepResult
 # ---------------------------------------------------------------------------
@@ -269,6 +305,7 @@ class StepResult:
         function_call_raw: Optional[dict] = None,
         html_shell: bool = False,
         content_type: str = "",
+        response_classification: Optional[Dict[str, Any]] = None,
         diagnostics: Optional[Dict[str, Any]] = None,
     ):
         self.request = request
@@ -281,6 +318,7 @@ class StepResult:
         self.function_call_raw = function_call_raw
         self.html_shell = html_shell
         self.content_type = content_type
+        self.response_classification = response_classification
         # Transport diagnostics are deliberately in-memory only.  They must
         # never cross the runner/cloud boundary in a turn or transcript.
         self.diagnostics = {
@@ -314,6 +352,8 @@ class StepResult:
             d["html_shell"] = True
         if self.content_type:
             d["content_type"] = self.content_type
+        if self.response_classification is not None:
+            d["response_classification"] = self.response_classification
         return d
 
 
@@ -933,32 +973,75 @@ class LocalTestExecutor:
                 diagnostics=context,
             )
 
-        # HTML shell detection
-        if _is_html_shell(resp.text, content_type):
-            return StepResult(
-                request=message,
-                response="[HTML SHELL]",
-                raw_reply="",
-                status_code=status_code,
-                elapsed_ms=elapsed_ms,
-                extraction_error=(
-                    f"Endpoint returned HTML shell instead of AI response "
-                    f"(HTTP {status_code}, type={content_type or 'unknown'})"
-                ),
-                html_shell=True,
-                content_type=content_type,
-                diagnostics=context,
-            )
-
-        # Parse JSON + extract reply
-        tool_calls_raw = None
-        function_call_raw = None
+        # Parse JSON before shell detection. A valid envelope is authoritative
+        # even when its model text contains HTML or the content type is wrong.
         try:
             resp_json = resp.json()
+            # Test doubles and malformed clients sometimes return arbitrary
+            # objects from json(); only JSON-native values count as parsed.
+            json_parsed = (
+                resp_json is None
+                or isinstance(resp_json, (dict, list, str, int, float, bool))
+            )
+        except Exception:
+            resp_json = None
+            json_parsed = False
+
+        if json_parsed:
+            reply, ext_err, matched_by = _extract_reply_with_meta(
+                resp_json, self.response_message_field
+            )
+            response_classification = {
+                "kind": "model_response" if reply else "extraction_failed",
+                "matched_by": (
+                    matched_by if reply else "json_envelope_no_field"
+                ),
+                "content_type": content_type or "",
+            }
+            if not reply:
+                return StepResult(
+                    request=message,
+                    response="[EXTRACTION FAILED]",
+                    raw_reply="",
+                    status_code=status_code,
+                    elapsed_ms=elapsed_ms,
+                    extraction_error=ext_err or f"Field '{self.response_message_field}' not found",
+                    content_type=content_type,
+                    response_classification=response_classification,
+                    diagnostics=context,
+                )
+        else:
+            shell_classification = _classify_html_shell(resp.text, content_type)
+            if shell_classification["kind"] == "html_shell":
+                return StepResult(
+                    request=message,
+                    response="[HTML SHELL]",
+                    raw_reply="",
+                    status_code=status_code,
+                    elapsed_ms=elapsed_ms,
+                    extraction_error=(
+                        f"Endpoint returned HTML shell instead of AI response "
+                        f"(HTTP {status_code}, type={content_type or 'unknown'})"
+                    ),
+                    html_shell=True,
+                    content_type=content_type,
+                    response_classification=shell_classification,
+                    diagnostics=context,
+                )
+            reply = resp.text[:2000].strip()
+            ext_err = None
+            response_classification = {
+                "kind": "model_response",
+                "matched_by": "raw_body",
+                "content_type": content_type or "",
+            }
+
+        # Structured tool calls (OpenAI + Anthropic)
+        tool_calls_raw = None
+        function_call_raw = None
+        if json_parsed:
             if self.session_id_field and isinstance(resp_json, dict):
                 self._session_value = resp_json.get(self.session_id_field)
-            reply, ext_err = _extract_reply(resp_json, self.response_message_field)
-            # Structured tool calls (OpenAI + Anthropic)
             _msg = ((resp_json.get("choices") or [{}])[0]).get("message", {})
             tool_calls_raw = _msg.get("tool_calls") or resp_json.get("tool_calls") or None
             function_call_raw = _msg.get("function_call") or resp_json.get("function_call") or None
@@ -969,23 +1052,6 @@ class LocalTestExecutor:
             ]
             if _anthropic_tools:
                 tool_calls_raw = (list(tool_calls_raw) if tool_calls_raw else []) + _anthropic_tools
-        except Exception:
-            reply = resp.text[:2000].strip()
-            ext_err = None
-
-        if not reply:
-            return StepResult(
-                request=message,
-                response="[EXTRACTION FAILED]",
-                raw_reply="",
-                status_code=status_code,
-                elapsed_ms=elapsed_ms,
-                extraction_error=ext_err or f"Field '{self.response_message_field}' not found",
-                tool_calls_raw=tool_calls_raw,
-                function_call_raw=function_call_raw,
-                content_type=content_type,
-                diagnostics=context,
-            )
 
         return StepResult(
             request=message,
@@ -996,6 +1062,7 @@ class LocalTestExecutor:
             tool_calls_raw=tool_calls_raw,
             function_call_raw=function_call_raw,
             content_type=content_type,
+            response_classification=response_classification,
             diagnostics=context,
         )
 

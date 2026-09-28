@@ -7,9 +7,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [0.5.4] — release preparation (not published)
 
 ### Fixed
+
+- Transport redaction no longer over-matches harmless response text when
+  filtering credentials from uploaded turns.
+- JSON response envelopes are extracted before HTML-shell heuristics, so an
+  HTML-looking model reply inside a valid envelope is not misclassified as a
+  proxy or application shell.
 
 - A malformed job envelope now fails only that job and leaves the poller
   running. When the invalid envelope contains an explicit non-empty string
@@ -35,8 +41,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Release requirement
 
-- Publication requires `badass-runner-protocol` 0.2.3 first, followed by
-  `badass-runner` 0.5.3. This change is not available in published runner 0.5.2.
+- Publish `badass-runner-protocol` 0.2.4 before `badass-runner` 0.5.4.
 
 ---
 

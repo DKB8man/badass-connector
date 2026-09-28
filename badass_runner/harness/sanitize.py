@@ -17,6 +17,8 @@ Design principles
 * The sanitizer is intentionally conservative: it never modifies status codes,
   elapsed_ms, or tool call *structure* — only string values.
 """
+import base64
+import binascii
 import re
 from typing import Any, Dict, List, Optional
 
@@ -24,10 +26,14 @@ _REDACTED = "[REDACTED]"
 
 _SECRET_PATTERN = re.compile(
     r'('
-    r'sk-[A-Za-z0-9_\-]{8,}|'                  # OpenAI / Anthropic-style key
+    r'(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}|'  # OpenAI / Anthropic-style key
     r'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+|'  # JWT
-    r'(?:Bearer|Basic)\s+[A-Za-z0-9+/=_\-]{8,}'  # Authorization header value
+    r'Bearer\s+[A-Za-z0-9+/=_\-]{8,}'           # Authorization header value
     r')',
+    re.IGNORECASE,
+)
+_BASIC_PATTERN = re.compile(
+    r'(?<![A-Za-z0-9])Basic\s+([A-Za-z0-9+/=_\-]{8,})',
     re.IGNORECASE,
 )
 
@@ -40,7 +46,19 @@ def _redact_str(text: str, known_secrets: List[str]) -> str:
         if secret and len(secret) >= 4:
             text = text.replace(secret, _REDACTED)
     text = _SECRET_PATTERN.sub(_REDACTED, text)
+    text = _BASIC_PATTERN.sub(_redact_basic, text)
     return text
+
+
+def _redact_basic(match: re.Match) -> str:
+    """Redact a Basic credential only when it decodes to ``user:password`` bytes."""
+    candidate = match.group(1).translate(str.maketrans("-_", "+/"))
+    candidate += "=" * (-len(candidate) % 4)
+    try:
+        decoded = base64.b64decode(candidate, validate=True)
+    except (binascii.Error, ValueError):
+        return match.group(0)
+    return _REDACTED if b":" in decoded else match.group(0)
 
 
 def _redact_value(obj: Any, known_secrets: List[str]) -> Any:
@@ -107,6 +125,11 @@ def sanitize_turns(
 
         if turn.get("content_type"):
             safe["content_type"] = str(turn["content_type"])
+
+        if turn.get("response_classification") is not None:
+            safe["response_classification"] = _redact_value(
+                turn["response_classification"], known
+            )
 
         if turn.get("step_headers_used") is not None:
             safe["step_headers_used"] = _redact_value(turn["step_headers_used"], known)

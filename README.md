@@ -11,9 +11,11 @@ private network to BADASS Cloud without requiring them to be publicly
 accessible.
 
 The runner establishes an outbound connection, executes authorized behavioral
-security tests locally, and returns structured, redacted results to the BADASS
-dashboard. It supports token-based registration, configurable endpoint access,
-CI and headless environments, and strict protocol validation.
+security tests locally, and returns the messages sent to the endpoint and the
+replies received to the BADASS dashboard, with authentication headers stripped
+and recognised secrets redacted. It supports token-based registration,
+configurable endpoint access, CI and headless environments, and strict protocol
+validation.
 
 The runner reports observed endpoint behavior. It does not claim that an
 upstream gateway enforced a policy unless that enforcement is independently
@@ -50,6 +52,9 @@ credentials provisioned into the runner-local store never leave that machine.
 ```bash
 pip install badass-runner
 ```
+
+See [PyPI release history](https://pypi.org/project/badass-runner/#history)
+for available versions.
 
 ### From source
 
@@ -133,9 +138,10 @@ badass-runner cred list
 ```
 
 The cloud sends only opaque credential references in schema-3 enforcement
-plans. The runner resolves them locally at execution time and uploads only
-sanitized observations. Credential values are never sent to the cloud. See
-[Where credentials live](#where-credentials-live) and
+plans. The runner resolves them locally at execution time and uploads the
+messages sent to the endpoint and the replies received, with authentication
+headers stripped and recognised secrets redacted. Credential values are never
+sent to the cloud. See [Where credentials live](#where-credentials-live) and
 [Runner-local credentials](docs/credentials.md).
 
 ---

@@ -5,7 +5,7 @@ This document describes the HTTP endpoints that the BADASS Connector
 reference for anyone maintaining the connector, writing a compatible server, or
 reasoning about what data crosses the trust boundary.
 
-**Current in-tree connector version:** `0.5.3` (unpublished)
+**Current in-tree connector version:** `0.5.3` (published)
 **Base URL:** configured at runtime via `--server-url` / `BADASS_SERVER_URL`.
 No URL is hardcoded in the connector.
 
@@ -291,7 +291,7 @@ Schema 2 remains unchanged and uses the existing value-bearing
 | `inter_request_delay_s` | float | 0.5 | Seconds to wait between consecutive steps within a test. |
 | `max_turns_per_test` | int | 5 | Hard cap on the number of prompt-response turns per test. |
 | `overall_run_timeout_s` | float | 600 | Total wall-clock budget for the entire run. |
-| `request_timeout_s` | float | 30 | Optional per-target read budget for runner 0.5.3 and newer (range: >0–120s). The server currently omits it for published-runner compatibility. Older jobs and runner 0.5.2 use the established runner default. |
+| `request_timeout_s` | float | 30 | Optional per-target read budget accepted by runner 0.5.3 and newer (range: >0–120s). The server emits the target's configured value for every runner-dispatched job; new targets default to 120s. Older jobs that omit it use the runner's 30s compatibility default. |
 
 #### Status codes
 
@@ -637,8 +637,8 @@ Before `start`, the connector calls the unauthenticated compatibility endpoint:
 ```
 GET /api/runners/version
 → {
-  "minimum_runner_version": "0.5.2",
-  "recommended_runner_version": "0.5.2",
+  "minimum_runner_version": "0.5.3",
+  "recommended_runner_version": "0.5.3",
   "api_contract_version": 1
 }
 ```

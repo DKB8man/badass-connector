@@ -8,16 +8,16 @@
 | Operating system | Linux, macOS, Windows (WSL recommended on Windows) |
 | Network | Outbound HTTPS to `https://badass-sec.com` |
 
-The currently published connector 0.5.2 depends only on:
+The currently published connector 0.5.3 depends only on:
 - [`click`](https://click.palletsprojects.com/) ≥ 8.0 — CLI framework
 - [`httpx`](https://www.python-httpx.org/) ≥ 0.28.0 — HTTP client
 - [`pydantic`](https://docs.pydantic.dev/) = 2.12.5 — strict wire-contract validation
-- `badass-runner-protocol` = 0.2.2 — public runner/cloud protocol contracts
+- `badass-runner-protocol` = 0.2.3 — public runner/cloud protocol contracts
 
 All dependencies are installed automatically.
 
-The source tree is preparing runner 0.5.3 with protocol 0.2.3. Do not request
-those versions from PyPI until the guarded release workflow has published them.
+Runner 0.5.3 and protocol 0.2.3 were published through the guarded release
+workflow.
 
 ---
 
@@ -58,7 +58,7 @@ pip install -e ".[dev]"
 
 ```bash
 badass-runner --version
-# badass-runner, version 0.5.2  # current published release
+# badass-runner, version 0.5.3  # current published release
 ```
 
 ```bash
@@ -146,7 +146,8 @@ badass-runner cred remove --target-ref TARGET_ID --context admin
 accepted through command-line arguments. Values are stored in the OS keyring,
 and the local mode-0600 index stores only non-secret references and auth
 metadata. Schema-3 jobs carry opaque references that the runner resolves
-locally; only sanitized observations are uploaded.
+locally; the messages sent to the endpoint and the replies received are
+uploaded, with authentication headers stripped and recognised secrets redacted.
 
 ---
 

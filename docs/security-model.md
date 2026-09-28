@@ -125,8 +125,9 @@ schema-3 enforcement plan containing an opaque target scope (`targetref_…`) an
 opaque credential references (`credref_…`), never credential values. The runner
 resolves those references against its local OS-keyring-backed store, constructs
 each request in memory, executes it against the target from the runner host, and
-uploads only sanitized observations. Missing or mismatched references fail
-before target HTTP.
+uploads the messages sent to the endpoint and the replies received, with
+authentication headers stripped and recognised secrets redacted. Missing or
+mismatched references fail before target HTTP.
 
 This is an implemented and end-to-end verified boundary, not an aspirational
 design claim. The R6 planted-secret capstone proves that a runner-local
