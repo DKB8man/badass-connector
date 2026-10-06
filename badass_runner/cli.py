@@ -285,13 +285,16 @@ def start(
             server_url=server_url,
             runner_name=runner_name,
             device_id=(existing and existing.device_id) or None,
-            status_port=port or (existing.status_port if existing else 7890),
+            status_port=(
+                port if port is not None
+                else (existing.status_port if existing else 7890)
+            ),
         )
     elif existing and existing.is_registered():
         cfg = existing
         if server_url:
             cfg.server_url = server_url
-        if port:
+        if port is not None:
             cfg.status_port = port
     else:
         click.echo(
@@ -394,10 +397,10 @@ def start(
     poller.start()
 
     log(logger, "info", "Runner ready",
-        runner_id=cfg.runner_id, status_port=cfg.status_port)
+        runner_id=cfg.runner_id, status_port=status_server.port)
     click.echo(
         f"Runner '{cfg.runner_name}' started (id: {cfg.runner_id})\n"
-        f"Status: http://127.0.0.1:{cfg.status_port}/status\n"
+        f"Status: http://127.0.0.1:{status_server.port}/status\n"
         f"Press Ctrl+C to stop."
     )
 

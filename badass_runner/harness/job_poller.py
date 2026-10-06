@@ -518,7 +518,15 @@ class JobPoller:
                         method_override=endpoint_method,
                         reset_session_before_first_request=True,
                     )
-                    safe_turns = sanitize_turns(raw_turns, auth_secrets)
+                    # execute_test owns these top-level dispatch timestamps;
+                    # target response fields never populate this metadata.
+                    safe_turns = sanitize_turns(
+                        raw_turns,
+                        auth_secrets,
+                        runner_step_sent_at=[
+                            turn.get("canary_step_sent_at") for turn in raw_turns
+                        ],
+                    )
                     # This is a runner-side transport assertion only.  It
                     # never claims that the target itself reset anything.
                     session_assertion = (

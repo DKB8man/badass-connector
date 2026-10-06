@@ -16,6 +16,7 @@ import base64
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, quote_plus
@@ -868,6 +869,7 @@ class LocalTestExecutor:
                 if self.session_id_field and self._session_value is not None:
                     params[self.session_id_field] = self._session_value
                 with httpx.Client(**self._client_kwargs(context)) as c:
+                    context["canary_step_sent_at"] = datetime.now(timezone.utc).isoformat()
                     resp = c.request(
                         method=method,
                         url=url,
@@ -895,6 +897,7 @@ class LocalTestExecutor:
                 if self.session_id_field and self._session_value is not None:
                     body[self.session_id_field] = self._session_value
                 with httpx.Client(**self._client_kwargs(context)) as c:
+                    context["canary_step_sent_at"] = datetime.now(timezone.utc).isoformat()
                     resp = c.request(
                         method=method,
                         url=url,
@@ -1123,7 +1126,12 @@ class LocalTestExecutor:
                 path_override=path_override,
                 method_override=method_override,
             )
-            turns.append(turn.to_dict())
+            turn_dict = turn.to_dict()
+            # Copy only our dispatch clock, never target response metadata.
+            canary_step_sent_at = turn.diagnostics.get("canary_step_sent_at")
+            if isinstance(canary_step_sent_at, str):
+                turn_dict["canary_step_sent_at"] = canary_step_sent_at
+            turns.append(turn_dict)
 
             # A reset index starts a new client-side identity before its request.
             if i + 1 in (new_session_before or []) and i + 1 < len(capped):

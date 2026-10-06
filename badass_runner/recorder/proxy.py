@@ -208,6 +208,8 @@ class RecorderProxy:
             self._server.shutdown()
         if self._thread:
             self._thread.join(timeout=3)
+        if self._server:
+            self._server.server_close()
         log(logger, "info", "Recorder proxy stopped", session_id=self.session_id)
 
     @property

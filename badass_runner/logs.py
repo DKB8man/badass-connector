@@ -31,8 +31,11 @@ def get_logger(name: str = "badass_runner") -> logging.Logger:
 
 def log(logger: logging.Logger, level: str, event: str, **fields) -> None:
     """Helper to emit a structured log entry with extra fields."""
+    numeric_level = getattr(logging, level.upper())
+    if not logger.isEnabledFor(numeric_level):
+        return
     record = logger.makeRecord(
-        logger.name, getattr(logging, level.upper()), "", 0, event, (), None
+        logger.name, numeric_level, "", 0, event, (), None
     )
     record.extra_fields = fields
     logger.handle(record)

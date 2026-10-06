@@ -42,6 +42,7 @@ class LocalStatusServer:
     def start(self) -> None:
         handler = _make_handler(self.get_state)
         self._server = HTTPServer(("127.0.0.1", self.port), handler)
+        self.port = self._server.socket.getsockname()[1]
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True, name="badass-status"
         )
@@ -54,6 +55,8 @@ class LocalStatusServer:
             self._server.shutdown()
         if self._thread:
             self._thread.join(timeout=3)
+        if self._server:
+            self._server.server_close()
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()

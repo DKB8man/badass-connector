@@ -20,6 +20,7 @@ Design principles
 import base64
 import binascii
 import re
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 _REDACTED = "[REDACTED]"
@@ -81,6 +82,8 @@ def _redact_value(obj: Any, known_secrets: List[str]) -> Any:
 def sanitize_turns(
     turns: List[Dict],
     auth_secrets: Optional[List[str]] = None,
+    *,
+    runner_step_sent_at: Optional[List[Optional[str]]] = None,
 ) -> List[Dict]:
     """Return a sanitized copy of *turns* safe to upload to the cloud.
 
@@ -92,6 +95,10 @@ def sanitize_turns(
         Credential string values from ``LocalAuthStore`` (bearer token value,
         API key value, etc.) that must never leave the runner.  Values shorter
         than 4 characters are ignored to avoid false-positive redaction.
+    runner_step_sent_at:
+        Trusted dispatch timestamps, one per turn, supplied separately by the
+        runner execution path. Never populate this from target response data.
+        Timestamp-shaped fields in *turns* are not trusted or copied.
 
     Returns
     -------
@@ -100,9 +107,11 @@ def sanitize_turns(
         ``"[REDACTED]"``.  The original *turns* list is never mutated.
     """
     known = [s for s in (auth_secrets or []) if s and len(s) >= 4]
+    if runner_step_sent_at is not None and len(runner_step_sent_at) != len(turns):
+        raise ValueError("Runner timestamp count must match turn count")
 
     sanitized = []
-    for turn in turns:
+    for index, turn in enumerate(turns):
         safe: Dict[str, Any] = {
             "request": _redact_str(str(turn.get("request", "")), known),
             "response": _redact_str(str(turn.get("response", "")), known),
@@ -133,6 +142,17 @@ def sanitize_turns(
 
         if turn.get("step_headers_used") is not None:
             safe["step_headers_used"] = _redact_value(turn["step_headers_used"], known)
+
+        if runner_step_sent_at is not None:
+            stamp = runner_step_sent_at[index]
+            if isinstance(stamp, str) and len(stamp) <= 64 and "T" in stamp:
+                try:
+                    parsed = datetime.fromisoformat(stamp)
+                except ValueError:
+                    pass
+                else:
+                    if parsed.utcoffset() == timedelta(0):
+                        safe["canary_step_sent_at"] = stamp
 
         sanitized.append(safe)
 
