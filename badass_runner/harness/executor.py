@@ -308,6 +308,7 @@ class StepResult:
         content_type: str = "",
         response_classification: Optional[Dict[str, Any]] = None,
         diagnostics: Optional[Dict[str, Any]] = None,
+        tool_calls_detail: Optional[list] = None,
     ):
         self.request = request
         self.response = response
@@ -317,6 +318,8 @@ class StepResult:
         self.extraction_error = extraction_error
         self.tool_calls_raw = tool_calls_raw
         self.function_call_raw = function_call_raw
+        # Forward separately through the same credential-redacted upload path.
+        self.tool_calls_detail = tool_calls_detail
         self.html_shell = html_shell
         self.content_type = content_type
         self.response_classification = response_classification
@@ -347,6 +350,8 @@ class StepResult:
             d["extraction_error"] = self.extraction_error
         if self.tool_calls_raw is not None:
             d["tool_calls_raw"] = self.tool_calls_raw
+        if self.tool_calls_detail is not None:
+            d["tool_calls_detail"] = self.tool_calls_detail
         if self.function_call_raw is not None:
             d["function_call_raw"] = self.function_call_raw
         if self.html_shell:
@@ -990,6 +995,9 @@ class LocalTestExecutor:
             resp_json = None
             json_parsed = False
 
+        tool_calls_raw = None
+        function_call_raw = None
+        tool_calls_detail = None
         if json_parsed:
             reply, ext_err, matched_by = _extract_reply_with_meta(
                 resp_json, self.response_message_field
@@ -1001,6 +1009,27 @@ class LocalTestExecutor:
                 ),
                 "content_type": content_type or "",
             }
+            # Structured tool calls (OpenAI + Anthropic)
+            _msg = ((resp_json.get("choices") or [{}])[0]).get("message", {})
+            tool_calls_raw = _msg.get("tool_calls") or resp_json.get("tool_calls") or None
+            function_call_raw = _msg.get("function_call") or resp_json.get("function_call") or None
+            # Structural evidence contains call objects, never names or scalars.
+            tool_calls_raw = (
+                [tc for tc in tool_calls_raw if isinstance(tc, dict)] or None
+            ) if isinstance(tool_calls_raw, list) else None
+            if not isinstance(function_call_raw, dict):
+                function_call_raw = None
+            _detail_entries = resp_json.get("tool_calls_detail")
+            tool_calls_detail = (
+                [entry for entry in _detail_entries if isinstance(entry, dict)] or None
+            ) if isinstance(_detail_entries, list) else None
+            _anthropic_tools = [
+                {"name": i.get("name", ""), "arguments": i.get("input", {})}
+                for i in (resp_json.get("content") or [])
+                if isinstance(i, dict) and i.get("type") == "tool_use"
+            ]
+            if _anthropic_tools:
+                tool_calls_raw = (list(tool_calls_raw) if tool_calls_raw else []) + _anthropic_tools
             if not reply:
                 return StepResult(
                     request=message,
@@ -1009,6 +1038,9 @@ class LocalTestExecutor:
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     extraction_error=ext_err or f"Field '{self.response_message_field}' not found",
+                    tool_calls_raw=tool_calls_raw,
+                    function_call_raw=function_call_raw,
+                    tool_calls_detail=tool_calls_detail,
                     content_type=content_type,
                     response_classification=response_classification,
                     diagnostics=context,
@@ -1039,22 +1071,9 @@ class LocalTestExecutor:
                 "content_type": content_type or "",
             }
 
-        # Structured tool calls (OpenAI + Anthropic)
-        tool_calls_raw = None
-        function_call_raw = None
         if json_parsed:
             if self.session_id_field and isinstance(resp_json, dict):
                 self._session_value = resp_json.get(self.session_id_field)
-            _msg = ((resp_json.get("choices") or [{}])[0]).get("message", {})
-            tool_calls_raw = _msg.get("tool_calls") or resp_json.get("tool_calls") or None
-            function_call_raw = _msg.get("function_call") or resp_json.get("function_call") or None
-            _anthropic_tools = [
-                {"name": i.get("name", ""), "arguments": i.get("input", {})}
-                for i in (resp_json.get("content") or [])
-                if isinstance(i, dict) and i.get("type") == "tool_use"
-            ]
-            if _anthropic_tools:
-                tool_calls_raw = (list(tool_calls_raw) if tool_calls_raw else []) + _anthropic_tools
 
         return StepResult(
             request=message,
@@ -1064,6 +1083,7 @@ class LocalTestExecutor:
             elapsed_ms=elapsed_ms,
             tool_calls_raw=tool_calls_raw,
             function_call_raw=function_call_raw,
+            tool_calls_detail=tool_calls_detail,
             content_type=content_type,
             response_classification=response_classification,
             diagnostics=context,

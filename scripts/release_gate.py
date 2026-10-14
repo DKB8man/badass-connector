@@ -236,7 +236,7 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
              *(str(p) for p in runner_files)], RUNNER)
         records: dict[str, dict[str, Any]] = {}
         for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.2.4"),
-                                               ("badass-runner", runner_out, "0.5.5")):
+                                               ("badass-runner", runner_out, "0.5.6")):
             files = built_artifacts(folder, distribution)
             for source in files:
                 kind = "wheel" if source.suffix == ".whl" else "sdist"
@@ -340,7 +340,7 @@ except ValueError: pass
 else: raise AssertionError("protocol accepted unknown field")
 entrypoint = pathlib.Path(sys.executable).with_name("badass-runner")
 version = subprocess.run([str(entrypoint),"--version"], check=True, text=True, capture_output=True)
-assert version.stdout.strip() == "badass-runner, version 0.5.5"
+assert version.stdout.strip() == "badass-runner, version 0.5.6"
 help_result = subprocess.run([str(entrypoint),"--help"], check=True, text=True, capture_output=True)
 assert "Commands:" in help_result.stdout and "start" in help_result.stdout
 """
