@@ -14,6 +14,7 @@
     "badass_runner/harness/enforcement.py",
     "badass_runner/harness/executor.py",
     "badass_runner/harness/job_poller.py",
+    "badass_runner/harness/native_calls.py",
     "badass_runner/harness/sanitize.py",
     "badass_runner/recorder/__init__.py",
     "badass_runner/recorder/proxy.py",

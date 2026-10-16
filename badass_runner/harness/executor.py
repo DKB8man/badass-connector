@@ -309,6 +309,7 @@ class StepResult:
         response_classification: Optional[Dict[str, Any]] = None,
         diagnostics: Optional[Dict[str, Any]] = None,
         tool_calls_detail: Optional[list] = None,
+        native_pairing_basis: Optional[str] = None,
     ):
         self.request = request
         self.response = response
@@ -320,6 +321,7 @@ class StepResult:
         self.function_call_raw = function_call_raw
         # Forward separately through the same credential-redacted upload path.
         self.tool_calls_detail = tool_calls_detail
+        self.native_pairing_basis = native_pairing_basis
         self.html_shell = html_shell
         self.content_type = content_type
         self.response_classification = response_classification
@@ -360,6 +362,8 @@ class StepResult:
             d["content_type"] = self.content_type
         if self.response_classification is not None:
             d["response_classification"] = self.response_classification
+        from .native_calls import pairing_metadata
+        d.update(pairing_metadata({"native_pairing_basis": self.native_pairing_basis}))
         return d
 
 
@@ -998,7 +1002,10 @@ class LocalTestExecutor:
         tool_calls_raw = None
         function_call_raw = None
         tool_calls_detail = None
+        native_pairing_basis = None
         if json_parsed:
+            from .native_calls import capture_native_calls, strip_pairing_metadata
+            resp_json = strip_pairing_metadata(resp_json)
             reply, ext_err, matched_by = _extract_reply_with_meta(
                 resp_json, self.response_message_field
             )
@@ -1013,10 +1020,9 @@ class LocalTestExecutor:
             _msg = ((resp_json.get("choices") or [{}])[0]).get("message", {})
             tool_calls_raw = _msg.get("tool_calls") or resp_json.get("tool_calls") or None
             function_call_raw = _msg.get("function_call") or resp_json.get("function_call") or None
-            # Structural evidence contains call objects, never names or scalars.
-            tool_calls_raw = (
-                [tc for tc in tool_calls_raw if isinstance(tc, dict)] or None
-            ) if isinstance(tool_calls_raw, list) else None
+            tool_calls_raw, native_pairing_basis = capture_native_calls(
+                tool_calls_raw, resp_json.get("tool_calls_detail"),
+            )
             if not isinstance(function_call_raw, dict):
                 function_call_raw = None
             _detail_entries = resp_json.get("tool_calls_detail")
@@ -1029,7 +1035,9 @@ class LocalTestExecutor:
                 if isinstance(i, dict) and i.get("type") == "tool_use"
             ]
             if _anthropic_tools:
-                tool_calls_raw = (list(tool_calls_raw) if tool_calls_raw else []) + _anthropic_tools
+                # A mixed transport is not an all-paired turn.
+                tool_calls_raw = ([] if native_pairing_basis else list(tool_calls_raw or [])) + _anthropic_tools
+                native_pairing_basis = None
             if not reply:
                 return StepResult(
                     request=message,
@@ -1039,6 +1047,7 @@ class LocalTestExecutor:
                     elapsed_ms=elapsed_ms,
                     extraction_error=ext_err or f"Field '{self.response_message_field}' not found",
                     tool_calls_raw=tool_calls_raw,
+                    native_pairing_basis=native_pairing_basis,
                     function_call_raw=function_call_raw,
                     tool_calls_detail=tool_calls_detail,
                     content_type=content_type,
@@ -1082,6 +1091,7 @@ class LocalTestExecutor:
             status_code=status_code,
             elapsed_ms=elapsed_ms,
             tool_calls_raw=tool_calls_raw,
+            native_pairing_basis=native_pairing_basis,
             function_call_raw=function_call_raw,
             tool_calls_detail=tool_calls_detail,
             content_type=content_type,

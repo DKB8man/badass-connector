@@ -41,15 +41,52 @@ _BASIC_PATTERN = re.compile(
 
 _AUTH_HEADER_KEYS = {"authorization", "cookie", "x-api-key", "x-auth-token"}
 
+# Mirror backend credential context; preserve ordinary findings and canaries.
+_SENSITIVE_ENV_VARS = (
+    r'DATABASE_URL|OPENAI_API_KEY|OPENAI_KEY|AWS_ACCESS_KEY_ID|'
+    r'AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GITHUB_TOKEN|GH_TOKEN|'
+    r'SESSION_SECRET|JWT_SECRET|SECRET_KEY|API_KEY|PRIVATE_KEY|'
+    r'REDIS_URL|PGPASSWORD'
+)
+_CREDENTIAL_NAMES = (
+    r"(?:(?:[a-z0-9]+[_-])*"
+    r"(?:api[_ -]?key|api[_ -]?secret|secret[_ -]?key|private[_ -]?key|"
+    r"access[_ -]?token|auth[_ -]?token|refresh[_ -]?token|client[_ -]?secret|"
+    r"password|passwd|pwd)|"
+    r"authorization|proxy-authorization|cookie|set-cookie|"
+    r"x-api-key|x-auth-token|x-access-token|csrf[_-]?token|"
+    r"csrfmiddlewaretoken|_token|x-csrf-token|"
+    + _SENSITIVE_ENV_VARS + r")"
+)
+_CREDENTIAL_KEY = re.compile(rf"^(?:{_CREDENTIAL_NAMES})$", re.I)
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    rf"""(?ix)(?<![a-z0-9_-])
+    (?P<prefix>["']?(?P<label>{_CREDENTIAL_NAMES})["']?
+        (?:\*\*)?\s*[=:](?:\*\*)?\s*)
+    (?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`|[^\s,"'`;&{{}}]+)
+    """
+)
+
+
+def _redact_credential_assignments(text: str) -> str:
+    def replace(match):
+        value = match["value"]
+        quote = value[0] if value[0] in "\"'`" else ""
+        return match["prefix"] + quote + _REDACTED + quote
+    return _CREDENTIAL_ASSIGNMENT.sub(replace, text)
+
 
 def _redact_str(text: str, known_secrets: List[str]) -> str:
     """Remove known secrets and common pattern-matched secrets from *text*."""
-    for secret in known_secrets:
+    for secret in sorted(
+        {s for s in known_secrets if isinstance(s, str) and s},
+        key=len, reverse=True,
+    ):
         if secret and len(secret) >= 4:
             text = text.replace(secret, _REDACTED)
     text = _SECRET_PATTERN.sub(_REDACTED, text)
     text = _BASIC_PATTERN.sub(_redact_basic, text)
-    return text
+    return _redact_credential_assignments(text)
 
 
 def _redact_basic(match: re.Match) -> str:
@@ -70,10 +107,13 @@ def _redact_value(obj: Any, known_secrets: List[str]) -> Any:
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            if k.lower() in _AUTH_HEADER_KEYS:
-                out[k] = _REDACTED
+            safe_key = _redact_str(k, known_secrets) if isinstance(k, str) else k
+            if isinstance(k, str) and (
+                k.lower() in _AUTH_HEADER_KEYS or _CREDENTIAL_KEY.fullmatch(k)
+            ):
+                out[safe_key] = _REDACTED
             else:
-                out[k] = _redact_value(v, known_secrets)
+                out[safe_key] = _redact_value(v, known_secrets)
         return out
     if isinstance(obj, list):
         return [_redact_value(item, known_secrets) for item in obj]

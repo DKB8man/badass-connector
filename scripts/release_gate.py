@@ -222,7 +222,17 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
         protocol_out, runner_out = work / "protocol-dist", work / "runner-dist"
         protocol_out.mkdir()
         runner_out.mkdir()
+        source_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPOSITORY,
+            env=child_env(), text=True,
+        ).strip()
+        print(f"BUILD_SOURCE_SHA={source_sha}", flush=True)
         run(["uv", "build", "--out-dir", str(protocol_out)], protocol_stage)
+        source_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPOSITORY,
+            env=child_env(), text=True,
+        ).strip()
+        print(f"BUILD_SOURCE_SHA={source_sha}", flush=True)
         run(["uv", "build", "--out-dir", str(runner_out)], runner_stage)
         protocol_files = built_artifacts(protocol_out, "badass-runner-protocol")
         run([
@@ -236,7 +246,7 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
              *(str(p) for p in runner_files)], RUNNER)
         records: dict[str, dict[str, Any]] = {}
         for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.2.4"),
-                                               ("badass-runner", runner_out, "0.5.6")):
+                                               ("badass-runner", runner_out, "0.5.7")):
             files = built_artifacts(folder, distribution)
             for source in files:
                 kind = "wheel" if source.suffix == ".whl" else "sdist"
@@ -340,7 +350,7 @@ except ValueError: pass
 else: raise AssertionError("protocol accepted unknown field")
 entrypoint = pathlib.Path(sys.executable).with_name("badass-runner")
 version = subprocess.run([str(entrypoint),"--version"], check=True, text=True, capture_output=True)
-assert version.stdout.strip() == "badass-runner, version 0.5.6"
+assert version.stdout.strip() == "badass-runner, version 0.5.7"
 help_result = subprocess.run([str(entrypoint),"--help"], check=True, text=True, capture_output=True)
 assert "Commands:" in help_result.stdout and "start" in help_result.stdout
 """

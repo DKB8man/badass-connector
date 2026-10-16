@@ -35,7 +35,7 @@ from ..logs import get_logger, log
 from ..target.builder import LocalAuthStore
 from ..target.credentials import MultiContextCredentialStore
 from .executor import LocalTestExecutor
-from .sanitize import sanitize_turns
+from .native_calls import prepare_turns_for_upload
 from badass_runner_protocol import (
     SESSION_IDENTITY_ASSERTION_BADASS_RESET,
     SESSION_IDENTITY_ASSERTION_NOT_ASSERTED,
@@ -475,7 +475,7 @@ class JobPoller:
                     raw_observations = executor.execute_surface_probe(
                         test.get("surface_probe_paths") or []
                     )
-                    scrub_turns = sanitize_turns(
+                    scrub_turns = prepare_turns_for_upload(
                         [
                             {
                                 "request": item["path"],
@@ -520,7 +520,7 @@ class JobPoller:
                     )
                     # execute_test owns these top-level dispatch timestamps;
                     # target response fields never populate this metadata.
-                    safe_turns = sanitize_turns(
+                    safe_turns = prepare_turns_for_upload(
                         raw_turns,
                         auth_secrets,
                         runner_step_sent_at=[
