@@ -18,7 +18,7 @@ import click
 import httpx
 
 from . import __version__
-from .client import CloudAPIError, RunnerClient
+from .client import CloudAPIError, RunnerClient, assert_certifi_floor
 from .config import (
     CONFIG_FILE,
     PID_FILE,
@@ -268,6 +268,10 @@ def start(
 
     Once registered, later starts use the saved permanent runner credentials.
     """
+    try:
+        assert_certifi_floor()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     cfg_file = Path(config_path) if config_path else CONFIG_FILE
     existing = load_config(cfg_file)
 

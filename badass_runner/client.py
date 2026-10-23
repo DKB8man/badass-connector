@@ -1,5 +1,7 @@
 from typing import List, Optional
+import re
 
+import certifi
 import httpx
 
 from badass_runner_protocol import (
@@ -10,6 +12,26 @@ from badass_runner_protocol import (
 )
 from . import __version__ as RUNNER_VERSION
 from .recorder.redact import redact_text
+
+CERTIFI_MIN_VERSION = "2026.10.19"
+
+
+def assert_certifi_floor() -> None:
+    """Fail closed before cloud access when the loaded CA package is obsolete."""
+    installed = getattr(certifi, "__version__", "unknown")
+    match = (
+        re.fullmatch(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", installed)
+        if isinstance(installed, str) else None
+    )
+    required = tuple(int(part) for part in CERTIFI_MIN_VERSION.split("."))
+    if match is None or tuple(map(int, match.groups())) < required:
+        raise RuntimeError(
+            f"Installed certifi {installed} does not meet the required floor "
+            f"{CERTIFI_MIN_VERSION}. Upgrade before starting the runner: "
+            "pipx runpip badass-runner install --upgrade "
+            f'"certifi>={CERTIFI_MIN_VERSION}"'
+        )
+
 
 RUNNER_CAPABILITIES = [
     BASELINE_PREFLIGHT_CAPABILITY,
@@ -35,6 +57,7 @@ class RunnerClient:
         runner_token: Optional[str] = None,
         timeout: int = 15,
     ) -> None:
+        assert_certifi_floor()
         self.server_url = server_url.rstrip("/")
         self.runner_token = runner_token
         self.timeout = timeout

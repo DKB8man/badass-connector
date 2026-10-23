@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import venv
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,7 @@ from typing import Any
 
 
 RUNNER = Path(__file__).resolve().parents[1]
+RUNNER_VERSION = tomllib.loads((RUNNER / "pyproject.toml").read_text())["project"]["version"]
 REPOSITORY = RUNNER.parent
 PROTOCOL = REPOSITORY / "badass-runner-protocol"
 GUARD = RUNNER / "scripts" / "export_guard.py"
@@ -70,12 +72,13 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def run(args: list[str], cwd: Path) -> None:
+def run(args: list[str], cwd: Path) -> str:
     result = subprocess.run(args, cwd=cwd, env=child_env(), text=True, capture_output=True)
     if result.returncode:
         raise GateError(
             "command failed: " + " ".join(args) + "\n" + result.stdout + result.stderr
         )
+    return result.stdout
 
 
 def require_out(path: Path) -> Path:
@@ -246,7 +249,7 @@ def build_once(output: Path) -> dict[str, dict[str, Any]]:
              *(str(p) for p in runner_files)], RUNNER)
         records: dict[str, dict[str, Any]] = {}
         for distribution, folder, version in (("badass-runner-protocol", protocol_out, "0.2.4"),
-                                               ("badass-runner", runner_out, "0.5.7")):
+                                               ("badass-runner", runner_out, RUNNER_VERSION)):
             files = built_artifacts(folder, distribution)
             for source in files:
                 kind = "wheel" if source.suffix == ".whl" else "sdist"
@@ -315,8 +318,10 @@ def clean_install(artifacts: Path) -> None:
         )
         code = r"""
 import importlib.util, pathlib, subprocess, sys
+import certifi
 import badass_runner, badass_runner_protocol
 from importlib.metadata import distribution
+print("CLEAN_INSTALL_CERTIFI", distribution("certifi").version, certifi.__version__, certifi.where(), flush=True)
 site = pathlib.Path(badass_runner.__file__).resolve().parent.parent
 repository = pathlib.Path(sys.argv[1]).resolve()
 assert all(
@@ -350,11 +355,11 @@ except ValueError: pass
 else: raise AssertionError("protocol accepted unknown field")
 entrypoint = pathlib.Path(sys.executable).with_name("badass-runner")
 version = subprocess.run([str(entrypoint),"--version"], check=True, text=True, capture_output=True)
-assert version.stdout.strip() == "badass-runner, version 0.5.7"
+assert version.stdout.strip() == f"badass-runner, version {sys.argv[2]}"
 help_result = subprocess.run([str(entrypoint),"--help"], check=True, text=True, capture_output=True)
 assert "Commands:" in help_result.stdout and "start" in help_result.stdout
 """
-        run([str(python), "-c", code, str(REPOSITORY.resolve())], root)
+        print(run([str(python), "-c", code, str(REPOSITORY.resolve()), RUNNER_VERSION], root), end="")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -365,8 +370,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("build", "verify", "all"):
         item = sub.add_parser(name)
         item.add_argument("--output", type=Path, required=True)
+        item.add_argument("--runner-version", choices=[RUNNER_VERSION])
     install = sub.add_parser("clean-install")
     install.add_argument("--artifacts", type=Path, required=True)
+    install.add_argument("--runner-version", choices=[RUNNER_VERSION])
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
