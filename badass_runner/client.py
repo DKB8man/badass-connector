@@ -12,6 +12,7 @@ from badass_runner_protocol import (
 )
 from . import __version__ as RUNNER_VERSION
 from .recorder.redact import redact_text
+from .logs import redact_log_value
 
 CERTIFI_MIN_VERSION = "2026.10.19"
 
@@ -160,7 +161,8 @@ class RunnerClient:
         if auth_status:
             body["auth_status"] = auth_status
         if auth_status_detail:
-            body["auth_status_detail"] = auth_status_detail
+            from .harness.sanitize import _redact_value
+            body["auth_status_detail"] = _redact_value(redact_log_value(auth_status_detail), [self.runner_token])
         try:
             resp = httpx.post(
                 f"{self.server_url}/api/runners/jobs/{run_id}/complete",
@@ -197,7 +199,8 @@ class RunnerClient:
         if auth_status:
             body["auth_status"] = auth_status
         if auth_status_detail:
-            body["auth_status_detail"] = auth_status_detail
+            from .harness.sanitize import _redact_value
+            body["auth_status_detail"] = _redact_value(redact_log_value(auth_status_detail), [self.runner_token])
         try:
             resp = httpx.post(
                 f"{self.server_url}/api/runners/jobs/{run_id}/fail",

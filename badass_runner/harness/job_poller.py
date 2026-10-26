@@ -31,7 +31,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from ..client import CloudAPIError, RunnerClient
-from ..logs import get_logger, log
+from ..logs import get_logger, log, log_secret_scope, remember_log_secrets, redact_log_value
 from ..target.builder import LocalAuthStore
 from ..target.credentials import MultiContextCredentialStore
 from .executor import LocalTestExecutor
@@ -125,7 +125,7 @@ class JobPoller:
     def _report_job_failure(self, run_id: str, reason: str) -> None:
         """Best-effort failure reporting must never stop the poller."""
         try:
-            self.client.fail_job(run_id, reason)
+            self.client.fail_job(run_id, redact_log_value(reason))
         except Exception as exc:
             log(
                 logger,
@@ -277,7 +277,11 @@ class JobPoller:
             return f"target returned HTTP {status_code}"
         return "target was unreachable or timed out"
 
+    @log_secret_scope()
     def _execute_job(self, job: Dict[str, Any]) -> None:
+        remember_log_secrets([getattr(self.client, "runner_token", None)])
+        if isinstance(self.auth_store, LocalAuthStore):
+            remember_log_secrets([self.auth_store.credential_value])
         # Validate the shared public contract while preserving the received
         # dictionary exactly (ordinary prompt tests intentionally omit mode).
         run_id = self._safe_run_id(job)
@@ -384,6 +388,7 @@ class JobPoller:
             auth_secrets: List[str] = []
             if executor_auth_store and executor_auth_store.credential_value:
                 auth_secrets.append(executor_auth_store.credential_value)
+            remember_log_secrets(auth_secrets)
 
             max_turns = int(limits.get("max_turns_per_test", 5))
             run_timeout = float(limits.get("overall_run_timeout_s", 600))
@@ -562,7 +567,7 @@ class JobPoller:
                         )
 
             except Exception as exc:
-                err_msg = str(exc)
+                err_msg = redact_log_value(str(exc))
                 log(logger, "error", "Test execution error",
                     run_id=run_id, test_id=test_id, error=err_msg)
                 if execution_type == "enforcement_probe" and not is_preflight:

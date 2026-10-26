@@ -115,7 +115,7 @@ def _redact_value(obj: Any, known_secrets: List[str]) -> Any:
             else:
                 out[safe_key] = _redact_value(v, known_secrets)
         return out
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [_redact_value(item, known_secrets) for item in obj]
     return obj
 
@@ -276,7 +276,7 @@ def sanitize_turns(
             safe["html_shell"] = True
 
         if turn.get("content_type"):
-            safe["content_type"] = str(turn["content_type"])
+            safe["content_type"] = _redact_value(str(turn["content_type"]), known)
 
         if turn.get("response_classification") is not None:
             safe["response_classification"] = _redact_value(

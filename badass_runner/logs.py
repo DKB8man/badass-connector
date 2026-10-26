@@ -1,7 +1,31 @@
 import json
 import logging
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
+
+_known = ContextVar("runner_log_known_literals", default=())
+
+
+@contextmanager
+def log_secret_scope(values=()):
+    """Keep known literals local to a job; never retain a previous job's secrets."""
+    token = _known.set(tuple(values))
+    try:
+        yield
+    finally:
+        _known.reset(token)
+
+
+def remember_log_secrets(values):
+    _known.set(tuple(set(_known.get()) | {v for v in values if isinstance(v, str) and v}))
+
+
+def redact_log_value(value):
+    # harness.__init__ imports the executor, which imports this logger.
+    from .harness.sanitize import _redact_value
+    return _redact_value(value, list(_known.get()))
 
 
 class _StructuredFormatter(logging.Formatter):
@@ -15,7 +39,9 @@ class _StructuredFormatter(logging.Formatter):
             entry.update(record.extra_fields)
         if record.exc_info:
             entry["exc"] = self.formatException(record.exc_info)
-        return json.dumps(entry)
+        if record.stack_info:
+            entry["stack"] = record.stack_info
+        return json.dumps(redact_log_value(entry))
 
 
 def get_logger(name: str = "badass_runner") -> logging.Logger:
