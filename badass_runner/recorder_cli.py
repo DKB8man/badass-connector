@@ -260,7 +260,13 @@ def recorder_build_target(
             click.echo(f"  Error: {validation_result.error}")
         elif validation_result.extracted_response:
             click.echo(f"  Probe    : {validation_result.probe_sent}")
-            click.echo(f"  Response : {validation_result.extracted_response[:120]}")
+            from .text_bound import redact_before_bound
+            from .logs import redact_log_value
+            click.echo(
+                "  Response : " + redact_before_bound(
+                    validation_result.extracted_response, 120, redactor=redact_log_value,
+                )
+            )
 
     click.echo(
         f"\nCloud-safe payload (no credentials):\n"

@@ -7,6 +7,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.10] — release preparation (not published)
+
+### Fixed
+
+- Redact complete admitted target responses and errors before bounding runner
+  evidence; preserve whole markers and include the truncation suffix in budgets.
+- Remove the recorder's implicit intermediate cap before diagnostic redaction.
+- Safely bound local validation displays. Protocol version and wire schemas
+  remain unchanged.
+
 ## [0.5.4] — release preparation (not published)
 
 ### Fixed

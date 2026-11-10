@@ -8,6 +8,7 @@
     "badass_runner/logs.py",
     "badass_runner/recorder_cli.py",
     "badass_runner/status_server.py",
+    "badass_runner/text_bound.py",
     "badass_runner/classifier/__init__.py",
     "badass_runner/classifier/classifier.py",
     "badass_runner/harness/__init__.py",

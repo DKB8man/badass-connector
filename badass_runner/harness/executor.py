@@ -16,6 +16,7 @@ import base64
 import re
 import time
 import uuid
+import zlib
 from datetime import datetime, timezone
 from http.cookies import SimpleCookie
 from typing import Any, Callable, Dict, List, Optional
@@ -26,7 +27,9 @@ import httpx
 from ..target.builder import LocalAuthStore
 from ..target.credentials import LocalCredential, MultiContextCredentialStore
 from ..target.proxy import bypassed_system_proxy_note
-from ..logs import get_logger, log
+from ..logs import get_logger, log, redact_log_value
+from ..text_bound import redact_before_bound
+from .sanitize import _redact_str
 from badass_runner_protocol import (
     _denial_code,
     deserialize_enforcement_probe,
@@ -45,6 +48,78 @@ POOL_TIMEOUT = 3.0
 REQUEST_ID_HEADER = "X-BADASS-Request-ID"
 DEFAULT_INTER_STEP_DELAY = 0.5
 MAX_ENFORCEMENT_RESPONSE_BYTES = 4096
+MAX_TARGET_WIRE_BYTES = 2 * 1024 * 1024
+MAX_TARGET_DECODED_BYTES = 5 * 1024 * 1024
+GET_LIKE_METHODS = {"GET", "HEAD"}
+
+
+class ResponseBudgetExceeded(ValueError):
+    """A partial response is never usable model output."""
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(f"target response truncated by budget: {reason}")
+
+
+def read_target_response(response):
+    """Bound raw wire bytes and decoder allocation before HTTPX buffers a reply."""
+    output, wire_read = bytearray(), 0
+    started = time.monotonic()
+    def fail(reason):
+        raise ResponseBudgetExceeded(reason)
+    try:
+        if response.request.method == "HEAD" or response.status_code in {204, 304}:
+            return httpx.Response(response.status_code, headers=response.headers, content=b"",
+                                  request=response.request, extensions={"budget_checked": True})
+        encoding = response.headers.get("content-encoding", "identity").strip().lower()
+        if encoding not in {"identity", "gzip", "deflate"}:
+            fail("unsupported_content_encoding")
+        length = response.headers.get("content-length", "")
+        if length.isascii() and length.isdigit() and (len(length) > 20 or int(length) > MAX_TARGET_WIRE_BYTES):
+            fail("target_wire_bytes")
+        decoder = None if encoding == "identity" else zlib.decompressobj(
+            16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS)
+        for chunk in response.iter_raw():
+            if time.monotonic() - started > 120:
+                fail("target_response_timeout")
+            wire_read += len(chunk)
+            if wire_read > MAX_TARGET_WIRE_BYTES:
+                fail("target_wire_bytes")
+            if decoder is None:
+                if len(output) + len(chunk) > MAX_TARGET_DECODED_BYTES:
+                    fail("target_decoded_bytes")
+                output.extend(chunk)
+            else:
+                while chunk:
+                    if decoder.eof:
+                        if encoding != "gzip":
+                            fail("trailing_compressed_data")
+                        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    try:
+                        decoded = decoder.decompress(chunk, MAX_TARGET_DECODED_BYTES - len(output) + 1)
+                    except zlib.error:
+                        if encoding == "deflate" and not output:
+                            decoder = zlib.decompressobj(-zlib.MAX_WBITS)
+                            try:
+                                decoded = decoder.decompress(chunk, MAX_TARGET_DECODED_BYTES + 1)
+                            except zlib.error:
+                                fail("invalid_compressed_response")
+                        else:
+                            fail("invalid_compressed_response")
+                    if len(output) + len(decoded) > MAX_TARGET_DECODED_BYTES:
+                        fail("target_decoded_bytes")
+                    output.extend(decoded)
+                    chunk = decoder.unused_data
+        if decoder is not None and not decoder.eof:
+            fail("incomplete_compressed_response")
+        headers = dict(response.headers)
+        headers.pop("content-encoding", None)
+        headers["content-length"] = str(len(output))
+        return httpx.Response(response.status_code, headers=headers, content=bytes(output),
+                              request=response.request, extensions={
+                                  **response.extensions, "budget_checked": True,
+                                  "budget_wire_bytes": wire_read, "budget_decoded_bytes": len(output)})
+    finally:
+        response.close()
 
 _HTML_MARKERS = ["@vite/client", "@react-refresh", "<head", "<body", "<!doctype html"]
 _HTTP_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -184,78 +259,108 @@ def _classify_html_shell(text: str, content_type: str) -> dict:
 
 
 def _as_str(val: Any) -> str:
+    stack, seen, size = [(val, 0)], set(), 0
+    while stack:
+        item, depth = stack.pop()
+        if depth > 64:
+            return ""
+        if isinstance(item, (dict, list)):
+            if id(item) in seen:
+                return ""
+            seen.add(id(item))
+            size += len(item) + 2
+            if isinstance(item, dict):
+                if any(not isinstance(key, str) for key in item):
+                    return ""
+                size += sum(len(key.encode("utf-8")) + 3 for key in item)
+                stack.extend((child, depth + 1) for child in item.values())
+            else:
+                stack.extend((child, depth + 1) for child in item)
+        elif isinstance(item, str):
+            size += len(item.encode("utf-8"))
+        elif item is None or isinstance(item, (int, float, bool)):
+            size += len(str(item))
+        else:
+            return ""
+        if size > MAX_TARGET_DECODED_BYTES:
+            return ""
     if val is None:
         return ""
-    if isinstance(val, str):
-        return val.strip()
-    if isinstance(val, list):
-        if val and isinstance(val[0], dict):
-            first = val[0]
-            return str(
-                first.get("text")
-                or first.get("content")
-                or (first.get("message") or {}).get("content")
-                or json.dumps(first)
-            )
-        return json.dumps(val)
-    if isinstance(val, dict):
-        return json.dumps(val)
+    if isinstance(val, (dict, list)):
+        chunks, size = [], 0
+        try:
+            for chunk in json.JSONEncoder(allow_nan=False).iterencode(val):
+                size += len(chunk.encode("utf-8"))
+                if size > MAX_TARGET_DECODED_BYTES:
+                    return ""
+                chunks.append(chunk)
+            return "".join(chunks)
+        except (ValueError, TypeError, RecursionError):
+            return ""
     return str(val).strip()
+
+
+def learned_session_value(value):
+    return str(value) if isinstance(value, (str, int, float)) else None
+
+
+def render_request(*, base_url, method, path, request_field, message=None,
+                   body_format="flat", extra_body_fields=None, request_body=None,
+                   session_id_field=None, session_value=None):
+    """Credential-free MT3 contract, conformed against the cloud runtime."""
+    from urllib.parse import urlparse
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    method = (method or "POST").split(",")[0].strip().upper()
+    headers = {"Origin": origin, "Referer": origin + "/"}
+    protected = request_body is not None
+    generated = dict(request_body or {})
+    if protected:
+        message = generated.pop("message", None)
+    body = dict(extra_body_fields or {})
+    if message is not None:
+        if body_format == "openai_messages" and (protected or method not in GET_LIKE_METHODS):
+            body["messages"] = [{"role": "user", "content": message}]
+        else:
+            body[request_field] = message
+    body.update(generated)
+    if not protected and method in GET_LIKE_METHODS:
+        return {"method": method, "path": path, "headers": headers,
+                "params": {request_field: (message or "")[:MAX_GET_MESSAGE_LEN]}}
+    if session_id_field and session_value is not None:
+        body[session_id_field] = learned_session_value(session_value)
+    if method in GET_LIKE_METHODS:
+        return {"method": method, "path": path, "headers": headers, "params": body}
+    headers["Content-Type"] = "application/json"
+    return {"method": method, "path": path, "headers": headers, "json": body}
 
 
 def _extract_reply(resp_json: Any, response_field: str):
     """Return ``(reply_text, extraction_error)`` from a JSON response.
 
-    Tries the configured field, case-insensitive fallback, common alternative
-    field names, and standard nested paths (OpenAI, Anthropic).
+    Resolve only the configured bounded path; never guess another field.
     """
-    if not isinstance(resp_json, dict):
-        return "", "Response was not a JSON object"
-
-    # Exact match
-    val = resp_json.get(response_field)
-    if val is not None:
-        s = _as_str(val)
-        if s:
-            return s, None
-
-    # Case-insensitive
-    for k, v in resp_json.items():
-        if k.lower() == response_field.lower() and v is not None:
-            s = _as_str(v)
-            if s:
-                return s, None
-
-    # Common fallbacks
-    for field in ("reply", "message", "content", "text", "answer", "output", "result", "response"):
-        if field == response_field:
-            continue
-        val = resp_json.get(field)
-        if val is not None:
-            s = _as_str(val)
-            if s:
-                return s, None
-
-    # OpenAI choices
-    choices = resp_json.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0]
-        if isinstance(first, dict):
-            msg = first.get("message") or {}
-            if isinstance(msg, dict) and msg.get("content"):
-                return str(msg["content"]), None
-            if first.get("text"):
-                return str(first["text"]), None
-
-    # Anthropic content
-    content = resp_json.get("content")
-    if isinstance(content, list) and content and isinstance(content[0], dict):
-        text = content[0].get("text", "")
-        if text:
-            return str(text), None
-
-    keys = list(resp_json.keys())
-    return "", f"Field '{response_field}' not found. Available keys: {keys}"
+    keys = list(resp_json) if isinstance(resp_json, dict) else []
+    error = "configured response field not found; top-level keys: " + json.dumps(keys)
+    if not isinstance(resp_json, dict) or not isinstance(response_field, str) or not response_field or len(response_field) > 200:
+        return "", error
+    parts = response_field.split(".")
+    if len(parts) > 8 or any(
+        not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", part) or
+        (part.isascii() and part.isdigit() and (len(part) > 3 or int(part) > 999))
+        for part in parts
+    ):
+        return "", error
+    node = resp_json
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isascii() and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return "", error
+    reply = _as_str(node)
+    return (reply, None) if reply else ("", error)
 
 
 def _extract_reply_with_meta(resp_json: Any, response_field: str):
@@ -263,28 +368,7 @@ def _extract_reply_with_meta(resp_json: Any, response_field: str):
     reply, error = _extract_reply(resp_json, response_field)
     if not reply:
         return reply, error, ""
-    if isinstance(resp_json, dict):
-        value = resp_json.get(response_field)
-        if value is not None and _as_str(value):
-            return reply, error, response_field
-        for key, value in resp_json.items():
-            if key.lower() == response_field.lower() and _as_str(value):
-                return reply, error, key
-        for field in ("reply", "message", "content", "text", "answer", "output", "result", "response"):
-            if field != response_field and field in resp_json and _as_str(resp_json[field]):
-                return reply, error, field
-        choices = resp_json.get("choices")
-        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-            message = choices[0].get("message") or {}
-            if isinstance(message, dict) and _as_str(message.get("content")):
-                return reply, error, "choices.0.message.content"
-            if _as_str(choices[0].get("text")):
-                return reply, error, "choices.0.text"
-        content = resp_json.get("content")
-        if isinstance(content, list) and content and isinstance(content[0], dict):
-            if _as_str(content[0].get("text")):
-                return reply, error, "content.0.text"
-    return reply, error, ""
+    return reply, error, response_field
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +523,15 @@ class LocalTestExecutor:
             return self.auth_store.apply_to_headers({})
         return {}
 
+    def _safe_excerpt(self, value: str, limit: int) -> str:
+        """Project complete target text with both instance and job credentials."""
+        credential = getattr(self.auth_store, "credential_value", None)
+        known = [credential] if isinstance(credential, str) and credential else []
+        return redact_before_bound(
+            value, limit,
+            redactor=lambda text: redact_log_value(_redact_str(text, known)),
+        )
+
     def _url(self, path_override: Optional[str] = None) -> str:
         path = (path_override or self.message_path).lstrip("/")
         return self.base_url + "/" + path
@@ -502,9 +595,21 @@ class LocalTestExecutor:
             exception_at=context.get("exception"),
         )
 
-    def _client_kwargs(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _client_kwargs(self, context: Dict[str, Any], *, bounded=False) -> Dict[str, Any]:
         def response_hook(_response: httpx.Response) -> None:
             context["headers_received"] = time.monotonic()
+            if bounded:
+                # Hooks run before Client.request auto-buffers. Read the raw
+                # transport through a separate response, then expose only its
+                # bounded decoded stream using public HTTPX interfaces.
+                materialized = read_target_response(httpx.Response(
+                    _response.status_code, headers=_response.headers,
+                    stream=_response.stream, request=_response.request,
+                    extensions=_response.extensions,
+                ))
+                _response.stream = httpx.ByteStream(materialized.content)
+                _response.headers = materialized.headers
+                _response.extensions.update(materialized.extensions)
 
         return {
             "timeout": self._timeout(),
@@ -542,7 +647,7 @@ class LocalTestExecutor:
                 observations.append({
                     "path": path,
                     "status_code": response.status_code,
-                    "response_excerpt": (response.text or "")[:1000],
+                    "response_excerpt": self._safe_excerpt(response.text or "", 1000),
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": None,
                 })
@@ -555,7 +660,7 @@ class LocalTestExecutor:
                     "status_code": 0,
                     "response_excerpt": "",
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
-                    "error": f"{exc}{bypassed_system_proxy_note(url)}"[:300],
+                    "error": self._safe_excerpt(f"{exc}{bypassed_system_proxy_note(url)}", 300),
                 })
             if self.inter_step_delay:
                 time.sleep(self.inter_step_delay)
@@ -625,14 +730,12 @@ class LocalTestExecutor:
                     )
                 continue
 
-            body = dict(variant["request_body"] or probe["request_body"])
-            if "message" in body:
-                message = body.pop("message")
-                if self.body_format == "openai_messages":
-                    body["messages"] = [{"role": "user", "content": message}]
-                else:
-                    body[self.request_message_field] = message
-            body = {**self.extra_body_fields, **body}
+            rendered = render_request(
+                base_url=self.base_url, method=method, path=probe["path"],
+                request_field=self.request_message_field,
+                request_body=variant["request_body"] or probe["request_body"],
+                body_format=self.body_format, extra_body_fields=self.extra_body_fields,
+            )
             authorized_headers = dict(probe["authorized_headers"] or {})
             authorized_headers = self.auth_store.apply_to_headers(
                 authorized_headers
@@ -650,7 +753,7 @@ class LocalTestExecutor:
                         leg_header_builder(variant, authorized)
                         if leg_header_builder else default_headers
                     )
-                    request_headers = dict(headers)
+                    request_headers = {**dict(headers), **rendered["headers"]}
                     request_kwargs = {
                         "method": method,
                         "url": self._url(probe["path"]),
@@ -659,9 +762,9 @@ class LocalTestExecutor:
                     context = self._diagnostic_context()
                     request_kwargs["headers"][REQUEST_ID_HEADER] = context["request_id"]
                     if method in {"GET", "HEAD"}:
-                        request_kwargs["params"] = body
+                        request_kwargs["params"] = rendered["params"]
                     else:
-                        request_kwargs["json"] = body
+                        request_kwargs["json"] = rendered["json"]
                         request_kwargs["headers"]["Content-Type"] = "application/json"
                     with httpx.Client(
                         **self._client_kwargs(context),
@@ -872,49 +975,33 @@ class LocalTestExecutor:
         request_headers[REQUEST_ID_HEADER] = context["request_id"]
 
         try:
-            if method in ("GET", "HEAD"):
-                msg_truncated = message[:MAX_GET_MESSAGE_LEN]
-                params = {self.request_message_field: msg_truncated}
-                if self.session_id_field and self._session_value is not None:
-                    params[self.session_id_field] = self._session_value
-                with httpx.Client(**self._client_kwargs(context)) as c:
-                    context["canary_step_sent_at"] = datetime.now(timezone.utc).isoformat()
-                    resp = c.request(
-                        method=method,
-                        url=url,
-                        params=params,
-                        headers=request_headers,
-                    )
-            else:
-                extra_body = {
-                    key: value
-                    for key, value in self.extra_body_fields.items()
-                    if not (
-                        self._suppress_static_session_field
-                        and key == self.session_id_field
-                    )
-                }
-                if self.body_format == "openai_messages":
-                    body = {
-                        "messages": [{"role": "user", "content": message}]
-                    }
-                else:
-                    body = {self.request_message_field: message}
-                # Match cloud send_message precedence: explicitly configured
-                # fields replace generated defaults on key collisions.
-                body.update(extra_body)
-                if self.session_id_field and self._session_value is not None:
-                    body[self.session_id_field] = self._session_value
-                with httpx.Client(**self._client_kwargs(context)) as c:
-                    context["canary_step_sent_at"] = datetime.now(timezone.utc).isoformat()
-                    resp = c.request(
-                        method=method,
-                        url=url,
-                        json=body,
-                        headers={**request_headers, "Content-Type": "application/json"},
-                    )
+            extra_body = {
+                key: value for key, value in self.extra_body_fields.items()
+                if not (self._suppress_static_session_field and key == self.session_id_field)
+            }
+            rendered = render_request(
+                base_url=self.base_url, method=method, path=path_override or self.message_path,
+                request_field=self.request_message_field, message=message,
+                body_format=self.body_format, extra_body_fields=extra_body,
+                session_id_field=self.session_id_field, session_value=self._session_value,
+            )
+            with httpx.Client(**self._client_kwargs(context, bounded=True)) as c:
+                context["canary_step_sent_at"] = datetime.now(timezone.utc).isoformat()
+                resp = c.request(
+                    method=rendered["method"], url=url,
+                    headers={**request_headers, **rendered["headers"], "Accept-Encoding": "gzip, deflate"},
+                    **{key: rendered[key] for key in ("json", "params") if key in rendered},
+                )
             context["body_complete"] = time.monotonic()
             self._log_transport_diagnostic(context)
+        except ResponseBudgetExceeded as exc:
+            context["exception"] = time.monotonic()
+            self._log_transport_diagnostic(context, exc)
+            return StepResult(
+                request=message, response="[TRUNCATED_BY_BUDGET]", raw_reply="",
+                status_code=0, elapsed_ms=int((time.monotonic() - context["request_started"]) * 1000),
+                extraction_error=str(exc), diagnostics=context,
+            )
         except httpx.TimeoutException as exc:
             context["exception"] = time.monotonic()
             self._log_transport_diagnostic(context, exc)
@@ -972,7 +1059,7 @@ class LocalTestExecutor:
             allow = resp.headers.get("allow", "")
             allow_note = f" Allow: {allow}" if allow else ""
             try:
-                snippet = resp.text[:500]
+                snippet = self._safe_excerpt(resp.text, 500)
             except Exception:
                 snippet = ""
             return StepResult(
@@ -1006,16 +1093,6 @@ class LocalTestExecutor:
         if json_parsed:
             from .native_calls import capture_native_calls, strip_pairing_metadata
             resp_json = strip_pairing_metadata(resp_json)
-            reply, ext_err, matched_by = _extract_reply_with_meta(
-                resp_json, self.response_message_field
-            )
-            response_classification = {
-                "kind": "model_response" if reply else "extraction_failed",
-                "matched_by": (
-                    matched_by if reply else "json_envelope_no_field"
-                ),
-                "content_type": content_type or "",
-            }
             # Structured tool calls (OpenAI + Anthropic)
             _msg = ((resp_json.get("choices") or [{}])[0]).get("message", {})
             tool_calls_raw = _msg.get("tool_calls") or resp_json.get("tool_calls") or None
@@ -1038,6 +1115,17 @@ class LocalTestExecutor:
                 # A mixed transport is not an all-paired turn.
                 tool_calls_raw = ([] if native_pairing_basis else list(tool_calls_raw or [])) + _anthropic_tools
                 native_pairing_basis = None
+            # Text extraction is separate from the complete native call record.
+            reply, ext_err, matched_by = _extract_reply_with_meta(
+                resp_json, self.response_message_field
+            )
+            response_classification = {
+                "kind": "model_response" if reply else "extraction_failed",
+                "matched_by": (
+                    matched_by if reply else "json_envelope_no_field"
+                ),
+                "content_type": content_type or "",
+            }
             if not reply:
                 return StepResult(
                     request=message,
@@ -1072,7 +1160,7 @@ class LocalTestExecutor:
                     response_classification=shell_classification,
                     diagnostics=context,
                 )
-            reply = resp.text[:2000].strip()
+            reply = self._safe_excerpt(resp.text, 2000).strip()
             ext_err = None
             response_classification = {
                 "kind": "model_response",
@@ -1082,7 +1170,9 @@ class LocalTestExecutor:
 
         if json_parsed:
             if self.session_id_field and isinstance(resp_json, dict):
-                self._session_value = resp_json.get(self.session_id_field)
+                learned = learned_session_value(resp_json.get(self.session_id_field))
+                if learned is not None:
+                    self._session_value = learned
 
         return StepResult(
             request=message,

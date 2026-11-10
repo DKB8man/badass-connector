@@ -11,7 +11,8 @@ Rules
 import re
 from typing import Dict, Optional
 
-from badass_runner_protocol import redact_before_truncate
+from badass_runner_protocol.enforcement import _redact
+from ..text_bound import redact_before_bound
 
 REDACTED = "[REDACTED]"
 
@@ -129,11 +130,9 @@ def redact_body(body: str, max_length: Optional[int] = None) -> str:
     * URL-encoded API-key fields: ``x-api-key=<val>``, ``api_key=<val>``, etc.
     * JSON API-key fields: ``"x-api-key": "<val>"``, ``"api_key": "<val>"``, etc.
     """
-    limit = len(body) if max_length is None else max_length
-    return redact_before_truncate(
-        body,
-        limit,
-        additional_redactor=_redact_recorder_fields,
+    return redact_before_bound(
+        body, max_length,
+        redactor=lambda text: _redact_recorder_fields(_redact(text, [])),
     )
 
 

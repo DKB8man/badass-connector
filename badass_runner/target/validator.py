@@ -39,6 +39,9 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlencode, urlparse
 
 import httpx
+from ..logs import redact_log_value
+from ..text_bound import redact_before_bound
+from ..harness.sanitize import _redact_str
 
 from .builder import LocalAuthStore, LocalTarget
 from .proxy import bypassed_system_proxy_note
@@ -337,7 +340,11 @@ class ValidationPreview:
         try:
             raw = resp.json()
         except Exception:
-            raw = {"_raw_text": resp.text[:500]}
+            known = [auth.credential_value] if auth else []
+            raw = {"_raw_text": redact_before_bound(
+                resp.text, 500,
+                redactor=lambda text: redact_log_value(_redact_str(text, known)),
+            )}
 
         extracted = _extract_field(raw, target.response_field)
 
